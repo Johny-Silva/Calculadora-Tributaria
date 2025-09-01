@@ -42,6 +42,23 @@ PERIODO_TIPO = Literal["Mensal", "Trimestral", "Anual", "Personalizado"]
 def format_brl(valor: float) -> str:
     return f"R$ {valor:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
 
+def format_pct_br(frac: float, casas: int = 2) -> str:
+    """Recebe fração (0.1925) e devolve '19,25%'."""
+    try:
+        s = f"{frac*100:,.{casas}f}%"
+        return s.replace(",", "_").replace(".", ",").replace("_", ".")
+    except Exception:
+        return "0,00%"
+
+def fmt_percent_styler(val):
+    """Usado por Styler; aceita fração."""
+    if pd.isna(val):
+        return ""
+    try:
+        return format_pct_br(float(val))
+    except Exception:
+        return val
+
 
 def brl_to_float(txt: str) -> float:
     if txt is None:
@@ -67,14 +84,56 @@ HEADER_CENTER = [
     {"selector": "th.col_heading.level0", "props": [("text-align", "center")]},
 ]
 
-def style_df_center_headers(df: pd.DataFrame, money_cols=None, perc_cols=None):
+def style_df_center_headers(df: pd.DataFrame, money_cols=None, perc_cols=None, percent_row_label: str = "Carga sobre Receita"):
     money_cols = money_cols or [
-        "Base","Crédito","Valor","PIS","COFINS","IRPJ","CSLL","INSS","ICMS","Total"
+        "Base","Crédito","Valor","PIS","COFINS","IRPJ","CSLL","INSS","ICMS","Total",
+        "Lucro Presumido","Lucro Real","Simples Nacional"
     ]
     perc_cols  = perc_cols  or ["Alíquota","Carga sobre Receita"]
-    fmt = {**{c: "R$ {:,.2f}" for c in money_cols if c in df.columns},
-           **{c: "{:.2%}"     for c in perc_cols  if c in df.columns}}
-    return df.style.format(fmt).set_table_styles(HEADER_CENTER).hide(axis="index")
+
+    sty = df.style.set_table_styles(HEADER_CENTER).hide(axis="index")
+
+    # coluna 0 (rótulos)
+    first_col = df.columns[0]
+
+    # máscara da linha "Carga sobre Receita"
+    ser_first = df[first_col].astype(str)
+    has_percent_row = percent_row_label in ser_first.values
+    row_mask = ser_first == percent_row_label
+
+    # formatador de dinheiro pt-BR
+    def _money_br(x):
+        try:
+            return format_brl(float(x))
+        except Exception:
+            return x
+
+    # -------- Formatos por coluna (base) --------
+    money_in_df = [c for c in money_cols if c in df.columns and c != first_col]
+    perc_in_df  = [c for c in perc_cols  if c in df.columns and c != first_col]
+
+    # 1) porcentagens "normais" por coluna (se existirem colunas percentuais)
+    if perc_in_df:
+        sty = sty.format({c: "{:.2%}" for c in perc_in_df})
+
+    # 2) linha especial "Carga sobre Receita": força % pt-BR em TODAS as colunas numéricas
+    if has_percent_row:
+        num_cols = [c for c in df.columns if c != first_col]
+        for c in num_cols:
+            sty = sty.format(fmt_percent_styler, subset=pd.IndexSlice[row_mask, c])
+
+    # 3) dinheiro pt-BR somente para as linhas que NÃO são a "Carga sobre Receita"
+    if money_in_df:
+        if has_percent_row:
+            for c in money_in_df:
+                sty = sty.format(_money_br, subset=pd.IndexSlice[~row_mask, c])
+        else:
+            for c in money_in_df:
+                sty = sty.format(_money_br, subset=[c])
+
+    return sty
+
+
 
 
 def moeda_input(label: str, key: str, value: float = 0.0,
@@ -920,23 +979,23 @@ def ui() -> None:
             sn = st.session_state.get("res_simples", None)
 
             # ---------- topo: KPIs em colunas ----------
-            cols = st.columns(3 if tem_sn else 2)
+            kpi_cols = st.columns(3 if tem_sn else 2)
 
-            with cols[0]:
+            with kpi_cols[0]:
                 st.subheader("Lucro Presumido")
                 st.metric("Total de Impostos", format_brl(rp.total_impostos))
-                st.metric("Carga Efetiva", f"{rp.carga_efetiva_sobre_receita*100:.2f}%")
+                st.metric("Carga Efetiva", format_pct_br(rp.carga_efetiva_sobre_receita))
 
-            with cols[1]:
+            with kpi_cols[1]:
                 st.subheader("Lucro Real")
                 st.metric("Total de Impostos", format_brl(rr.total_impostos))
-                st.metric("Carga Efetiva", f"{rr.carga_efetiva_sobre_receita*100:.2f}%")
+                st.metric("Carga Efetiva", format_pct_br(rr.carga_efetiva_sobre_receita))
 
             if tem_sn:
-                with cols[2]:
+                with kpi_cols[2]:
                     st.subheader("Simples Nacional")
                     st.metric("DAS do mês", format_brl(sn["das_mes"]))
-                    st.metric("Alíquota Efetiva", f"{sn['aliquota_efetiva']*100:.2f}%")
+                    st.metric("Alíquota Efetiva", format_pct_br(sn['aliquota_efetiva']))
                     st.metric("Anexo", sn["anexo"])
 
             # ---------- detalhamento: abas para “desafogar” o painel ----------
@@ -983,45 +1042,42 @@ def ui() -> None:
             st.divider()
             st.subheader("Resumo (Comparativo)")
 
-            # Para o Simples, só faz sentido comparar Total e Carga Efetiva.
-            # (Os tributos por dentro do DAS virão numa fase 2 com 'breakdown'.)
-            colunas = ["Lucro Presumido", "Lucro Real"]
-            if tem_sn:
-                colunas.append("Simples Nacional")
-
-            linhas = [
-                ("PIS", rp.pis, rr.pis, None if not tem_sn else None),
-                ("COFINS", rp.cofins, rr.cofins, None if not tem_sn else None),
-                ("IRPJ", rp.irpj_total, rr.irpj_total, None if not tem_sn else None),
-                ("CSLL", rp.csll, rr.csll, None if not tem_sn else None),
-                ("INSS", rp.inss, rr.inss, None if not tem_sn else None),
-                ("ICMS", rp.icms_devido, rr.icms_devido, None if not tem_sn else None),
-                ("Total", rp.total_impostos, rr.total_impostos, None if not tem_sn else sn["das_mes"]),
-                ("Carga sobre Receita", rp.carga_efetiva_sobre_receita, rr.carga_efetiva_sobre_receita,
-                None if not tem_sn else (sn["das_mes"] / sn["receita_mes"] if sn.get("receita_mes", 0) > 0 else 0.0)),
-            ]
-
-            cols = {
+            # Monte um dicionário separado do nome usado para o layout
+            comp_dict = {
                 "Imposto": ["PIS","COFINS","IRPJ","CSLL","INSS","ICMS","Total","Carga sobre Receita"],
-                "Lucro Presumido": [rp.pis, rp.cofins, rp.irpj_total, rp.csll, rp.inss, rp.icms_devido, rp.total_impostos, rp.carga_efetiva_sobre_receita],
-                "Lucro Real":      [rr.pis, rr.cofins, rr.irpj_total, rr.csll, rr.inss, rr.icms_devido, rr.total_impostos, rr.carga_efetiva_sobre_receita],
+                "Lucro Presumido": [
+                    float(rp.pis), float(rp.cofins), float(rp.irpj_total), float(rp.csll),
+                    float(rp.inss), float(rp.icms_devido), float(rp.total_impostos),
+                    float(rp.carga_efetiva_sobre_receita),
+                ],
+                "Lucro Real": [
+                    float(rr.pis), float(rr.cofins), float(rr.irpj_total), float(rr.csll),
+                    float(rr.inss), float(rr.icms_devido), float(rr.total_impostos),
+                    float(rr.carga_efetiva_sobre_receita),
+                ],
             }
+
+            # Se tiver Simples, inclua os números (sem strings com %)
             if sn is not None:
-                cols["Simples Nacional"] = [
+                total_simples = float(sn.get("das_total_com_difal", sn["das_mes"]))
+                carga_simples = (total_simples / sn["receita_mes"]) if sn.get("receita_mes", 0) > 0 else 0.0
+                comp_dict["Simples Nacional"] = [
                     None, None, None, None, None, None,
-                    sn["das_mes"],
-                    (sn["das_mes"] / sn["receita_mes"]) if sn.get("receita_mes", 0) > 0 else 0.0
+                    total_simples,
+                    float(carga_simples),
                 ]
-            df_comp = pd.DataFrame(cols)
+
+            df_comp = pd.DataFrame(comp_dict)
 
             st.dataframe(
                 style_df_center_headers(
                     df_comp,
                     perc_cols=["Carga sobre Receita"],
-                    money_cols=["Lucro Presumido","Lucro Real"] + (["Simples Nacional"] if tem_sn else [])
+                    money_cols=["Lucro Presumido","Lucro Real"] + (["Simples Nacional"] if "Simples Nacional" in df_comp.columns else [])
                 ).hide(axis="index"),
                 use_container_width=True
-            )
+)
+
 
 
         # ===== Exportações =====
