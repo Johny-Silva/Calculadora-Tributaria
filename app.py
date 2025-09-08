@@ -20,6 +20,8 @@ from streamlit.components.v1 import html as st_html
 
 import json
 from functools import lru_cache
+import altair as alt
+import numpy as np
 
 
 # ============================
@@ -41,6 +43,24 @@ PERIODO_TIPO = Literal["Mensal", "Trimestral", "Anual", "Personalizado"]
 # ============================
 # Utilidades
 # ============================
+
+import numpy as np
+
+def normalize_df_for_streamlit(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    - Em colunas numéricas: mantém NaN (ok p/ Arrow e formatação).
+    - Em colunas textuais (object/string): troca None/NaN por "".
+    """
+    df2 = df.copy()
+    for col in df2.columns:
+        if pd.api.types.is_numeric_dtype(df2[col]):
+            # deixa NaN como está (não vira None)
+            continue
+        # textual: limpa None/NaN
+        df2[col] = df2[col].astype("object").where(df2[col].notna(), "")
+        df2[col] = df2[col].replace({None: ""})
+    return df2
+
 
 
 
@@ -112,6 +132,24 @@ HEADER_CENTER = [
     {"selector": "th.col_heading.level0", "props": [("text-align", "center")]},
 ]
 
+def _sanitize_arrow(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    if "Simples Nacional" in df.columns:
+        s = df["Simples Nacional"]
+        # garante que não haja bytes/strings
+        s = s.map(lambda v: None if isinstance(v, (bytes, bytearray)) else v)
+        # converte para float (NaN se não for numérico)
+        s = pd.to_numeric(s, errors="coerce")
+        df["Simples Nacional"] = s
+
+    for col in ("Lucro Presumido", "Lucro Real"):
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    return df
+
+
 def style_df_center_headers(df: pd.DataFrame, money_cols=None, perc_cols=None, percent_row_label: str = "Carga sobre Receita"):
     money_cols = money_cols or [
         "Base","Crédito","Valor","PIS","COFINS","IRPJ","CSLL","INSS","ISS","ICMS","Total",
@@ -134,8 +172,10 @@ def style_df_center_headers(df: pd.DataFrame, money_cols=None, perc_cols=None, p
     money_in_df = [c for c in money_cols if c in df.columns and c != first_col]
     perc_in_df  = [c for c in perc_cols  if c in df.columns and c != first_col]
 
-    if perc_in_df:
-        sty = sty.format({c: "{:.2%}" for c in perc_in_df})
+    # depois (usa seu formatter tolerante)
+    for c in perc_in_df:
+        sty = sty.format(fmt_percent_styler, subset=[c])
+
 
     if has_percent_row:
         num_cols = [c for c in df.columns if c != first_col]
@@ -312,6 +352,7 @@ class Entradas:
     icms_aliquota: float
     icms_creditos: float
     icms_percentual_st: float
+    zerar_pis_cofins_icms: bool = False
     
     
     inss_aliquota: float = INSS_PATRONAL_ALIQ_DEFAULT
@@ -350,22 +391,19 @@ class ResultadoRegime:
 
 
 def _icms_destacado_saida(e: Entradas) -> float:
-    if e.servicos_sem_icms:
+    if e.servicos_sem_icms or e.zerar_pis_cofins_icms:
         return 0.0
     return float(e.receita_icms or 0.0) * float(e.icms_aliquota or 0.0) * (1.0 - float(e.icms_percentual_st or 0.0))
-
-
 
 def _icms_simplificado(e: Entradas) -> Tuple[float, float, float]:
     """
     Cálculo simplificado do ICMS:
-      Débito  = receita_icms (base vendas) × alíquota × (1 - %ST)
-      Crédito = icms_creditos (base compras) × alíquota
-      Devido  = Débito - Crédito  (pode ser negativo: saldo credor)
+      Débito  = receita_icms × alíquota × (1 - %ST)
+      Crédito = icms_creditos × alíquota
+      Devido  = Débito - Crédito
     """
-    if e.servicos_sem_icms:
+    if e.servicos_sem_icms or e.zerar_pis_cofins_icms:
         return 0.0, 0.0, 0.0
-
     debito  = float(e.receita_icms or 0.0) * float(e.icms_aliquota or 0.0) * (1.0 - float(e.icms_percentual_st or 0.0))
     credito = float(e.icms_creditos or 0.0) * float(e.icms_aliquota or 0.0)
     devido  = debito - credito
@@ -376,15 +414,25 @@ def _icms_simplificado(e: Entradas) -> Tuple[float, float, float]:
 
 
 
+
 def calcular_lucro_presumido(e: Entradas) -> ResultadoRegime:
     icms_debito, icms_credito, icms_devido = _icms_simplificado(e)
     icms_destacado_saida = _icms_destacado_saida(e)
+
+    # Bases “normais”
     base_pis = max(e.receita_bruta - icms_destacado_saida, 0.0)
     base_cofins = base_pis
     credito_pis = 0.0
     credito_cofins = 0.0
     pis = base_pis * PIS_PRESUMIDO
     cofins = base_cofins * COFINS_PRESUMIDO
+
+    # NOVO — isenção setorial (ex.: livros)
+    if e.zerar_pis_cofins_icms:
+        base_pis = base_cofins = 0.0
+        pis = cofins = 0.0
+        # (ICMS já veio 0 pelo _icms_simplificado/_icms_destacado_saida)
+
     base_irpj = e.receita_bruta * e.presumido_irpj_base
     irpj_15 = base_irpj * IRPJ_ALIQ
     irpj_adic = adicional_irpj(base_irpj, e.periodo, e.meses_personalizado)
@@ -392,8 +440,6 @@ def calcular_lucro_presumido(e: Entradas) -> ResultadoRegime:
     base_csll = e.receita_bruta * e.presumido_csll_base
     csll = base_csll * CSLL_ALIQ
     inss = e.folha_inss_base * e.inss_aliquota
-
-    # NEW — ISS 5% somente para serviços
     iss = (e.receita_bruta * ISS_ALIQ) if empresa_de_servicos(e) else 0.0
 
     total = pis + cofins + irpj_total + csll + inss + iss + icms_devido
@@ -403,7 +449,6 @@ def calcular_lucro_presumido(e: Entradas) -> ResultadoRegime:
                            base_cofins, credito_cofins, cofins,
                            base_irpj, irpj_15, irpj_adic, irpj_total,
                            base_csll, csll, inss,
-                           # NEW (iss)
                            iss,
                            icms_debito, icms_credito, icms_devido,
                            total, carga)
@@ -426,6 +471,12 @@ def calcular_lucro_real(e: Entradas) -> ResultadoRegime:
     pis = base_pis * PIS_REAL
     cofins = base_cofins * COFINS_REAL
 
+    # NOVO — isenção setorial (ex.: livros)
+    if e.zerar_pis_cofins_icms:
+        base_pis = base_cofins = 0.0
+        pis = cofins = 0.0
+        # (ICMS já veio 0 pelo _icms_simplificado)
+
     lucro_liquido = receita - float(e.despesas_totais or 0.0)
     base_irpj = max(lucro_liquido, 0.0)
     base_csll = max(lucro_liquido, 0.0)
@@ -434,8 +485,6 @@ def calcular_lucro_real(e: Entradas) -> ResultadoRegime:
     irpj_total = irpj_15 + irpj_adic
     csll = base_csll * CSLL_ALIQ
     inss = float(e.folha_inss_base or 0.0) * float(e.inss_aliquota or 0.0)
-
-    # NEW — ISS 5% somente para serviços
     iss = (receita * ISS_ALIQ) if empresa_de_servicos(e) else 0.0
 
     total = pis + cofins + irpj_total + csll + inss + iss + icms_devido
@@ -447,11 +496,11 @@ def calcular_lucro_real(e: Entradas) -> ResultadoRegime:
         base_cofins, credito_cofins, cofins,
         base_irpj, irpj_15, irpj_adic, irpj_total,
         base_csll, csll, inss,
-        # NEW (iss)
         iss,
         icms_debito, icms_credito, icms_devido,
         total, carga
     )
+
 
 
 
@@ -537,6 +586,8 @@ def calcular_simples(inp: SimplesInput):
 # Exportadores
 # ============================
 
+import numpy as np
+
 def _df_detalhamento(e: Entradas, r: ResultadoRegime, periodo: PERIODO_TIPO, regime_nome: str) -> pd.DataFrame:
     if regime_nome == "Lucro Presumido":
         aliq_pis = PIS_PRESUMIDO
@@ -557,17 +608,24 @@ def _df_detalhamento(e: Entradas, r: ResultadoRegime, periodo: PERIODO_TIPO, reg
         {"Tributo": "INSS", "Base": e.folha_inss_base, "Crédito": 0.0, "Alíquota": e.inss_aliquota, "Valor": r.inss},
     ]
 
-    # NEW — só adiciona ISS quando for serviço
     if empresa_de_servicos(e):
         linhas.append({"Tributo": "ISS", "Base": e.receita_bruta, "Crédito": 0.0, "Alíquota": ISS_ALIQ, "Valor": r.iss})
 
-    # ICMS permanece igual
-    linhas.append({"Tributo": "ICMS",
-                   "Base": (0.0 if e.servicos_sem_icms else e.receita_icms * (1.0 - e.icms_percentual_st)),
-                   "Crédito": r.icms_credito, "Alíquota": e.icms_aliquota, "Valor": r.icms_devido})
-    linhas.append({"Tributo": "TOTAL", "Base": None, "Crédito": None, "Alíquota": None, "Valor": r.total_impostos})
+    linhas.append({
+        "Tributo": "ICMS",
+        "Base": (0.0 if e.servicos_sem_icms else e.receita_icms * (1.0 - e.icms_percentual_st)),
+        "Crédito": r.icms_credito,
+        "Alíquota": e.icms_aliquota,
+        "Valor": r.icms_devido
+    })
 
-    return pd.DataFrame(linhas)
+    # 🔧 aqui troquei None por np.nan (para não aparecer None na tela)
+    linhas.append({"Tributo": "TOTAL", "Base": np.nan, "Crédito": np.nan, "Alíquota": np.nan, "Valor": r.total_impostos})    
+    df = pd.DataFrame(linhas)
+    df = normalize_df_for_streamlit(df)
+    return df
+
+    
 
 
 def gerar_excel(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas, periodo: PERIODO_TIPO, sn: dict | None = None) -> bytes:
@@ -577,9 +635,9 @@ def gerar_excel(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas, periodo: 
     "Lucro Real": [rr.pis, rr.cofins, rr.irpj_total, rr.csll, rr.inss, rr.iss, rr.icms_devido, rr.total_impostos, rr.carga_efetiva_sobre_receita],
     }
     
-    if sn is not None:
+    if sn is not np.nan:
         cols["Simples Nacional"] = [
-            None, None, None, None, None, None, None,
+            "", "", "", "", "", "", "",
             sn.get("das_total_com_difal", sn["das_mes"]),
             (sn.get("das_total_com_difal", sn["das_mes"]) / sn["receita_mes"]) if sn.get("receita_mes", 0) > 0 else 0.0
         ]
@@ -587,6 +645,8 @@ def gerar_excel(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas, periodo: 
 
     dflp = _df_detalhamento(e, rp, periodo, "Lucro Presumido")
     dflr = _df_detalhamento(e, rr, periodo, "Lucro Real")
+    
+    
 
     periodo_desc = e.periodo if e.periodo != "Personalizado" else f"Personalizado ({e.meses_personalizado} meses)"
     if str(e.atividade).startswith("Personalizado"):
@@ -650,8 +710,8 @@ def gerar_excel(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas, periodo: 
                         elif fmt is perc_fmt: fmt = total_perc_fmt
                         else: fmt = total_money_fmt
                     cell_row = r + i; cell_col = start_col + j
-                    if pd.isna(val): ws.write_blank(cell_row, cell_col, None, fmt)
-                    elif isinstance(val, (int, float)) and fmt is not None: ws.write_number(cell_row, cell_col, float(val), fmt)
+                    if pd.isna(val): ws.write_blank(cell_row, cell_col, np.nan, fmt)
+                    elif isinstance(val, (int, float)) and fmt is not np.nan: ws.write_number(cell_row, cell_col, float(val), fmt)
                     else: ws.write(cell_row, cell_col, val, fmt)
             for j, col in enumerate(df.columns):
                 width = 24 if col in ("Regime","Tributo","Imposto","Item") else 18
@@ -666,8 +726,8 @@ def gerar_excel(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas, periodo: 
             r += 1
             for i, (name, value, kind) in enumerate(rows):
                 ws.write(r + i, start_col + 0, name)
-                fmt = money_fmt if kind == "money" else perc_fmt if kind == "percent" else None
-                if isinstance(value, (int, float)) and fmt is not None: ws.write_number(r + i, start_col + 1, float(value), fmt)
+                fmt = money_fmt if kind == "money" else perc_fmt if kind == "percent" else np.nan
+                if isinstance(value, (int, float)) and fmt is not np.nan: ws.write_number(r + i, start_col + 1, float(value), fmt)
                 else: ws.write(r + i, start_col + 1, value)
             ws.set_column(start_col + 0, start_col + 0, 28)
             ws.set_column(start_col + 1, start_col + 1, 26)
@@ -675,37 +735,90 @@ def gerar_excel(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas, periodo: 
 
         row = 0
         row = write_block("Resumo (Comparativo)", row, 0, df_comp, total_row_name="Total")
+
+        # --- GRÁFICO (Excel): Total por Regime a partir de H16 ---
+        from xlsxwriter.utility import xl_rowcol_to_cell, xl_range
+
+        start_row = 15   # linha 16 (0-based)
+        start_col = 7    # coluna H (0-based)
+
+        regimes = ["Lucro Presumido", "Lucro Real"]
+        totais  = [float(rp.total_impostos), float(rr.total_impostos)]
+        if sn is not None:
+            regimes.append("Simples Nacional")
+            totais.append(float(sn.get("das_total_com_difal", sn["das_mes"])))
+
+        # header
+        ws.write(start_row,   start_col,     "Regime", header_fmt)
+        ws.write(start_row,   start_col + 1, "Total (R$)", header_fmt)
+
+        # dados
+        for i, (reg, val) in enumerate(zip(regimes, totais), start=1):
+            ws.write(start_row + i, start_col,     reg)
+            ws.write_number(start_row + i, start_col + 1, val, money_fmt)
+
+        # referências
+        first = start_row + 1
+        last  = start_row + len(regimes)
+
+        categorias_ref = f"=Relatório!{xl_range(first, start_col, last, start_col)}"
+        valores_ref    = f"=Relatório!{xl_range(first, start_col + 1, last, start_col + 1)}"
+
+        chart = wb.add_chart({"type": "column"})
+        chart.add_series({
+            "name":       "Total por Regime",
+            "categories": categorias_ref,
+            "values":     valores_ref,
+            "data_labels": {"value": True, "num_format": "R$ #,##0.00"},
+        })
+        chart.set_title({"name": "Total de tributos por regime"})
+        chart.set_legend({"none": True})
+        chart.set_y_axis({"num_format": "R$ #,##0"})
+        chart.set_size({"width": 520, "height": 300})
+
+        # ancora o gráfico algumas colunas à direita do range (H16 → insere em K16)
+        ws.insert_chart(start_row, start_col + 3, chart)
+
+
+
+
         row = write_block("Detalhamento — Lucro Presumido", row, 0, dflp, total_row_name="TOTAL")
         row = write_block("Detalhamento — Lucro Real", row, 0, dflr, total_row_name="TOTAL")
 
         if sn is not None:
             df_sn = pd.DataFrame([
-                {"Item": "RBT12",                  "Valor": sn.get("rbt12", 0.0)},
-                {"Item": "Receita do mês",         "Valor": sn.get("receita_mes", 0.0)},
-                {"Item": "Folha 12m",              "Valor": sn.get("folha_12m", 0.0)},
-                {"Item": "Anexo",                  "Valor": str(sn["anexo"])},
-                {"Item": "Alíquota Nominal",       "Valor": sn["aliquota_nominal"]},
-                {"Item": "Parcela a Deduzir (PD)", "Valor": sn["parcela_deduzir"]},
-                {"Item": "Alíquota Efetiva",       "Valor": sn["aliquota_efetiva"]},
-                {"Item": "DAS do mês",             "Valor": sn["das_mes"]},
+                {"Item": "RBT12", "": sn.get("rbt12", 0.0)},
+                {"Item": "Receita do mês", "": sn.get("receita_mes", 0.0)},
+                {"Item": "Folha 12m", "": sn.get("folha_12m", 0.0)},
 
-                # Vendas (agregado)
-                {"Item": "DIFAL Vendas — Base (soma)", "Valor": sn.get("difal_base_v", 0.0)},
-                {"Item": "DIFAL Vendas — Alíquotas / UFs", "Valor": "múltiplas linhas"},
-                {"Item": "DIFAL Vendas — Parcela (aliq × base)", "Valor": sn.get("difal_parte_v", 0.0)},
-                {"Item": "DIFAL Vendas — FCP (R$)", "Valor": sn.get("fcp_valor_v", 0.0)},
-                {"Item": "DIFAL Vendas — Total", "Valor": sn.get("difal_total_v", 0.0)},
+                {"Item": "CNAE", "": "", "Info": sn.get("cnae", "")},
+                {"Item": "Anexo", "": "", "Info": sn.get("anexo", "")},
 
-                # Compras (agregado)
-                {"Item": "DIFAL Compras — Base (soma)", "Valor": sn.get("difal_base_c", 0.0)},
-                {"Item": "DIFAL Compras — Alíquotas / UFs", "Valor": "múltiplas linhas"},
-                {"Item": "DIFAL Compras — Parcela (aliq × base)", "Valor": sn.get("difal_parte_c", 0.0)},
-                {"Item": "DIFAL Compras — FCP (R$)", "Valor": sn.get("fcp_valor_c", 0.0)},
-                {"Item": "DIFAL Compras — Total", "Valor": sn.get("difal_total_c", 0.0)},
+                {"Item": "Alíquota Nominal", "": sn["aliquota_nominal"]},
+                {"Item": "Parcela a Deduzir (PD)", "": sn["parcela_deduzir"]},
+                {"Item": "Alíquota Efetiva", "": sn["aliquota_efetiva"]},
+                {"Item": "DAS do mês", "": sn["das_mes"]},
 
-                {"Item": f"Total Simples ({sn.get('criterio_soma_difal','Nenhum')})", "Valor": sn.get("das_total_com_difal", sn["das_mes"])},
+                {"Item": "DIFAL Vendas — Base (soma)", "": sn.get("difal_base_v", 0.0)},
+                {"Item": "DIFAL Vendas — Alíquotas / UFs", "": "", "Info": "múltiplas linhas"},
+                {"Item": "DIFAL Vendas — Parcela (Δ aliq × base)", "": sn.get("difal_parte_v", 0.0)},
+                {"Item": "DIFAL Vendas — FCP (R$)", "": sn.get("fcp_valor_v", 0.0)},
+                {"Item": "DIFAL Vendas — Total", "": sn.get("difal_total_v", 0.0)},
+
+                {"Item": "DIFAL Compras — Base (soma)", "": sn.get("difal_base_c", 0.0)},
+                {"Item": "DIFAL Compras — Alíquotas / UFs", "": "", "Info": "múltiplas linhas"},
+                {"Item": "DIFAL Compras — Parcela (Δ aliq × base)", "": sn.get("difal_parte_c", 0.0)},
+                {"Item": "DIFAL Compras — FCP (R$)", "": sn.get("fcp_valor_c", 0.0)},
+                {"Item": "DIFAL Compras — Total", "": sn.get("difal_total_c", 0.0)},
+
+                {"Item": f"Total Simples ({sn.get('criterio_soma_difal','Nenhum')})",
+                "Valor": sn.get("das_total_com_difal", sn["das_mes"])},
             ])
-            row = write_block("Simples Nacional", row, 0, df_sn, total_row_name=None)
+
+            df_sn["Valor"] = pd.to_numeric(df_sn["Valor"], errors="coerce")
+            if "Info" in df_sn.columns:
+                df_sn["Info"] = df_sn["Info"].fillna("").replace({None: ""})
+
 
         _ = write_params_block(0, 7, params_rows)
 
@@ -762,6 +875,50 @@ def gerar_pdf(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas, sn: dict | 
 
     y -= 0.2*cm
 
+
+    def draw_column_chart(cvs, x0, y0, w, h, pares):
+        """
+        Desenha colunas verticais (Regime, Total) centradas em (x0,y0) com largura w, altura h.
+        pares: list[tuple[str, float]]
+        """
+        if not pares:
+            return
+        max_v = max(v for _, v in pares) or 1.0
+        n = len(pares)
+        # cálculo de largura de barra e gaps para ficar compacto e centralizado
+        gap = 18
+        bar_w = min(58, max(28, (w - gap*(n+1)) / max(n,1)))
+        total_w = bar_w*n + gap*(n+1)
+        start_x = x0 + (w - total_w)/2.0
+
+        # eixo Y (0 -> max)
+        cvs.setLineWidth(0.6)
+        cvs.line(x0, y0, x0, y0 + h)  # eixo Y
+        cvs.line(x0, y0, x0 + w, y0)  # eixo X
+
+        cvs.setFont("Helvetica", 8)
+        # marcas Y (0%, 50%, 100%)
+        for frac in (0.0, 0.5, 1.0):
+            yy = y0 + h*frac
+            cvs.setDash(1,2) if frac not in (0.0,) else cvs.setDash()  # linha pontilhada
+            cvs.line(x0, yy, x0 + w, yy)
+            cvs.setDash()
+            label = format_brl(max_v*frac)
+            cvs.drawRightString(x0 - 6, yy - 3, label)
+
+        # barras
+        cvs.setFillGray(0.2)  # cinza neutro
+        for i, (nome, val) in enumerate(pares):
+            x = start_x + gap*(i+1) + bar_w*i
+            altura = 0 if max_v <= 0 else (val / max_v) * (h - 8)
+            cvs.rect(x, y0, bar_w, altura, fill=1, stroke=0)
+            # rótulo do valor
+            cvs.setFillGray(0)
+            cvs.drawCentredString(x + bar_w/2, y0 + altura + 8, format_brl(val))
+            # rótulo do regime
+            cvs.drawCentredString(x + bar_w/2, y0 - 12, nome)
+
+
     def bloco(titulo, r, y):
         c.setFont("Helvetica-Bold", 12); c.drawString(2*cm, y, titulo); y -= 0.45*cm
         c.setFont("Helvetica", 10)
@@ -788,6 +945,7 @@ def gerar_pdf(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas, sn: dict | 
     y = bloco("Lucro Real", rr, y)
 
     y -= 0.4*cm
+
 
     if sn is not None:
         c.setFont("Helvetica-Bold", 12); c.drawString(2*cm, y, "Simples Nacional"); y -= 0.45*cm
@@ -821,6 +979,29 @@ def gerar_pdf(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas, sn: dict | 
         for nome, val in linhas_sn:
             c.drawString(2.5*cm, y, f"{nome}: {val}"); y -= 0.38*cm
             if y < 3*cm: c.showPage(); y = h - 2*cm; c.setFont("Helvetica", 10)
+
+    # === GRÁFICO FINAL: Total de tributos por regime ===
+    pares = [("Lucro Pres.", float(rp.total_impostos)),
+             ("Lucro Real", float(rr.total_impostos))]
+    if sn is not None:
+        pares.append(("Simples", float(sn.get("das_total_com_difal", sn["das_mes"]))))
+
+    # se faltar espaço na página corrente, abre nova página
+    if y < 9*cm:
+        c.showPage(); y = h - 2*cm
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(2*cm, y, "Total de tributos por regime")
+    y -= 0.6*cm
+
+    # largura menor (≈ 12 cm) e centralizado
+    gw = 12*cm
+    gh = 6.2*cm
+    gx = (w - gw) / 2.0
+    gy = y - gh
+    draw_column_chart(c, gx, gy, gw, gh, pares)
+    y = gy - 0.8*cm
+    
 
     c.showPage(); c.save()
     return buff.getvalue()
@@ -1077,6 +1258,15 @@ def ui() -> None:
             presumido_irpj_base = st.number_input("Base Presumida IRPJ (%)", 0.0, 100.0, 8.0, 0.5) / 100.0
             presumido_csll_base = st.number_input("Base Presumida CSLL (%)", 0.0, 100.0, 12.0, 0.5) / 100.0
 
+        # NOVO — modo isenção setorial (ex.: livros)
+        st.header("Isenção PIS/COFINS/ICMS")
+        zerar_pis_cofins_icms = st.toggle(
+            "Zerar PIS, COFINS e ICMS (casos específicos, ex.: livros)",
+            value=False,
+            help="Quando ligado, zera PIS, COFINS e ICMS nos cálculos do Lucro Presumido e Lucro Real. "
+                "Use para atividades com imunidade/isenção setorial. Não afeta Simples Nacional."
+    )
+
         st.header("Folha / INSS")
         folha_inss = moeda_input("Base da Folha (R$)", key="folha_inss", value=0.0)
         inss_aliquota = st.number_input("Alíquota INSS (%)", 0.0, 100.0, 26.8, 0.1) / 100.0
@@ -1132,6 +1322,7 @@ def ui() -> None:
     despesas_totais=despesas_totais, energia_eletrica=energia, aluguel=aluguel,
     servicos_sem_icms=servicos_sem_icms, receita_icms=receita_icms,
     icms_aliquota=icms_aliquota, icms_creditos=icms_creditos, icms_percentual_st=icms_percentual_st,
+    zerar_pis_cofins_icms=zerar_pis_cofins_icms,
 )
 
 
@@ -1210,7 +1401,11 @@ def ui() -> None:
                 st.metric("DIFAL Compras", format_brl(sn.get("difal_total_c", 0.0)))
                 st.metric(f"Total ({sn.get('criterio_soma_difal','Nenhum')})", format_brl(sn.get("das_total_com_difal", sn["das_mes"])))
                 st.metric("Alíquota Efetiva", format_pct_br(sn['aliquota_efetiva']))
-                st.metric("Anexo", sn["anexo"])
+                def _txt(x): 
+                    return "" if x is None else str(x)
+                # exemplo
+                st.metric("Anexo", _txt(sn.get("anexo")))
+                
 
         st.divider()
         if tem_sn:
@@ -1220,97 +1415,220 @@ def ui() -> None:
             tab_sn = None
 
         with tab_lp:
-            st.dataframe(style_df_center_headers(_df_detalhamento(entradas, rp, periodo, "Lucro Presumido")), use_container_width=True)
+            dflp = _df_detalhamento(entradas, rp, periodo, "Lucro Presumido")
+            st.dataframe(style_df_center_headers(dflp), use_container_width=True)
+
         with tab_lr:
-            st.dataframe(style_df_center_headers(_df_detalhamento(entradas, rr, periodo, "Lucro Real")), use_container_width=True)
+            dflr = _df_detalhamento(entradas, rr, periodo, "Lucro Real")
+            st.dataframe(style_df_center_headers(dflr), use_container_width=True)
+
 
         if tab_sn is not None:
             df_sn = pd.DataFrame([
                 {"Item": "RBT12", "Valor": sn.get("rbt12", 0.0)},
                 {"Item": "Receita do mês", "Valor": sn.get("receita_mes", 0.0)},
                 {"Item": "Folha 12m", "Valor": sn.get("folha_12m", 0.0)},
-                {"Item": "CNAE", "Valor": sn.get("cnae", "-")},
-                {"Item": "Anexo", "Valor": sn["anexo"]},
-                {"Item": "Alíquota Nominal", "Valor": sn["aliquota_nominal"]},
+
+                {"Item": "CNAE",  "Valor": "", "Info": sn.get("cnae", "")},
+                {"Item": "Anexo", "Valor": "", "Info": sn.get("anexo", "")},
+
+                {"Item": "Alíquota Nominal",       "Valor": sn["aliquota_nominal"]},
                 {"Item": "Parcela a Deduzir (PD)", "Valor": sn["parcela_deduzir"]},
-                {"Item": "Alíquota Efetiva", "Valor": sn["aliquota_efetiva"]},
-                {"Item": "DAS do mês", "Valor": sn["das_mes"]},
-                # Vendas
+                {"Item": "Alíquota Efetiva",       "Valor": sn["aliquota_efetiva"]},
+                {"Item": "DAS do mês",             "Valor": sn["das_mes"]},
+
                 {"Item": "DIFAL Vendas — Base (soma)", "Valor": sn.get("difal_base_v", 0.0)},
-                {"Item": "DIFAL Vendas — Alíquotas / UFs", "Valor": "múltiplas linhas"},
+                {"Item": "DIFAL Vendas — Alíquotas / UFs", "Valor": "", "Info": "múltiplas linhas"},
                 {"Item": "DIFAL Vendas — Parcela (Δ aliq × base)", "Valor": sn.get("difal_parte_v", 0.0)},
                 {"Item": "DIFAL Vendas — FCP (R$)", "Valor": sn.get("fcp_valor_v", 0.0)},
                 {"Item": "DIFAL Vendas — Total", "Valor": sn.get("difal_total_v", 0.0)},
-                # Compras
+
                 {"Item": "DIFAL Compras — Base (soma)", "Valor": sn.get("difal_base_c", 0.0)},
-                {"Item": "DIFAL Compras — Alíquotas / UFs", "Valor": "múltiplas linhas"},
+                {"Item": "DIFAL Compras — Alíquotas / UFs", "Valor": "", "Info": "múltiplas linhas"},
                 {"Item": "DIFAL Compras — Parcela (Δ aliq × base)", "Valor": sn.get("difal_parte_c", 0.0)},
                 {"Item": "DIFAL Compras — FCP (R$)", "Valor": sn.get("fcp_valor_c", 0.0)},
                 {"Item": "DIFAL Compras — Total", "Valor": sn.get("difal_total_c", 0.0)},
-                {"Item": f"Total Simples ({sn.get('criterio_soma_difal','Nenhum')})", "Valor": sn.get("das_total_com_difal", sn["das_mes"])},
+
+                {"Item": f"Total Simples ({sn.get('criterio_soma_difal','Nenhum')})",
+                "Valor": sn.get("das_total_com_difal", sn["das_mes"])},
             ])
+
+            # Numérico coerente
+            df_sn["Valor"] = pd.to_numeric(df_sn["Valor"], errors="coerce")
+            if "Info" in df_sn.columns:
+                df_sn["Info"] = df_sn["Info"].fillna("").replace({None: ""})
+
+            # aplica o normalizador para colunas textuais
+            df_sn = normalize_df_for_streamlit(df_sn)
+
             def _fmt_sn(df: pd.DataFrame):
                 sty = df.style.set_table_styles(HEADER_CENTER).hide(axis="index")
                 s = df["Item"].astype(str)
 
-                # Itens sempre em R$
-                money_items = ["RBT12", "Receita do mês", "Folha 12m", "Parcela a Deduzir (PD)", "DAS do mês"]
-
-                # Sufixos que aparecem nas linhas de DIFAL
+                money_items = ["RBT12","Receita do mês","Folha 12m","Parcela a Deduzir (PD)","DAS do mês"]
                 difal_suffixes = ["Base (soma)", "Parcela (Δ aliq × base)", "FCP (R$)", "Total"]
-                difal_items = [f"DIFAL {tipo} — {suf}" for tipo in ("Vendas", "Compras") for suf in difal_suffixes]
+                difal_items = [f"DIFAL {tipo} — {suf}" for tipo in ("Vendas","Compras") for suf in difal_suffixes]
 
-                # Máscaras
                 money_mask = s.isin(money_items + difal_items) | s.str.startswith("Total Simples")
-                perc_mask = s.isin(["Alíquota Nominal", "Alíquota Efetiva"])
+                perc_mask  = s.isin(["Alíquota Nominal","Alíquota Efetiva"])
 
-                # Formatadores
                 def _fmt_brl(v):
-                    try:
-                        return format_brl(float(v))
-                    except Exception:
-                        return v
+                    try: return format_brl(float(v))
+                    except Exception: return v
 
                 sty = sty.format(formatter="{:.2%}", subset=pd.IndexSlice[perc_mask, "Valor"])
                 sty = sty.format(formatter=_fmt_brl, subset=pd.IndexSlice[money_mask, "Valor"])
                 return sty
 
-
             with tab_sn:
                 st.dataframe(_fmt_sn(df_sn), use_container_width=True)
 
-        st.divider()
-        st.subheader("Resumo (Comparativo)")
-        comp_dict = {
-            "Imposto": ["PIS","COFINS","IRPJ","CSLL","INSS","ISS","ICMS","Total","Carga sobre Receita"],
-            "Lucro Presumido": [float(rp.pis), float(rp.cofins), float(rp.irpj_total), float(rp.csll), float(rp.inss), float(rp.iss), float(rp.icms_devido), float(rp.total_impostos), float(rp.carga_efetiva_sobre_receita)],
-            "Lucro Real": [float(rr.pis), float(rr.cofins), float(rr.irpj_total), float(rr.csll), float(rr.inss), float(rr.iss), float(rr.icms_devido), float(rr.total_impostos), float(rr.carga_efetiva_sobre_receita)],
-        }
-        if sn is not None:
-            total_simples = float(sn.get("das_total_com_difal", sn["das_mes"]))
-            carga_simples = (total_simples / sn["receita_mes"]) if sn.get("receita_mes", 0) > 0 else 0.0
-            # 7 None (PIS, COFINS, IRPJ, CSLL, INSS, ISS, ICMS), depois Total e Carga
-            comp_dict["Simples Nacional"] = [None,None,None,None,None,None,None, total_simples, float(carga_simples)]
+            st.divider()
+            st.subheader("Resumo (Comparativo)")
 
+            comp_dict = {
+                "Imposto": ["PIS","COFINS","IRPJ","CSLL","INSS","ISS","ICMS","Total","Carga sobre Receita"],
+                "Lucro Presumido": [
+                    float(rp.pis), float(rp.cofins), float(rp.irpj_total), float(rp.csll),
+                    float(rp.inss), float(rp.iss), float(rp.icms_devido),
+                    float(rp.total_impostos), float(rp.carga_efetiva_sobre_receita)
+                ],
+                "Lucro Real": [
+                    float(rr.pis), float(rr.cofins), float(rr.irpj_total), float(rr.csll),
+                    float(rr.inss), float(rr.iss), float(rr.icms_devido),
+                    float(rr.total_impostos), float(rr.carga_efetiva_sobre_receita)
+                ],
+            }
+
+            if sn is not None:
+                total_simples = float(sn.get("das_total_com_difal", sn["das_mes"]))
+                carga_simples = (total_simples / sn["receita_mes"]) if sn.get("receita_mes", 0) > 0 else 0.0
+                # 7 NaN (linhas não monetárias do Simples), depois Total e Carga
+                import numpy as np
+                comp_dict["Simples Nacional"] = [np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan,
+                                                total_simples, float(carga_simples)]
+
+            # >>> cria SEMPRE o df, fora do if
             df_comp = pd.DataFrame(comp_dict)
+            df_comp = _sanitize_arrow(df_comp)             # numéricas → float/NaN
+            df_comp = normalize_df_for_streamlit(df_comp)  # textuais → "" (sem None)
+
             st.dataframe(
-                style_df_center_headers(df_comp, perc_cols=["Carga sobre Receita"],
-                                        money_cols=["Lucro Presumido","Lucro Real"] + (["Simples Nacional"] if "Simples Nacional" in df_comp.columns else [])
-                                    ).hide(axis="index"),
-                use_container_width=True
+                style_df_center_headers(
+                    df_comp,
+                    perc_cols=["Carga sobre Receita"],
+                    money_cols=["Lucro Presumido","Lucro Real"] + (["Simples Nacional"] if "Simples Nacional" in df_comp.columns else []),
+                ),
+                use_container_width=True,
             )
+
+
+
+
+
+            # === NOVO: Gráficos de comparação ===
+            st.markdown("### 📈 Visualizações — Comparativo entre regimes")
+
+            # Base de dados: Regime / Total / (Carga opcional – não vamos mostrar aqui)
+            dados = [
+                {"Regime": "Lucro Presumido", "Total": float(rp.total_impostos)},
+                {"Regime": "Lucro Real",      "Total": float(rr.total_impostos)},
+            ]
+            if isinstance(sn, dict) and sn:
+                total_sn = float(sn.get("das_total_com_difal", sn["das_mes"]))
+                dados.append({"Regime": "Simples Nacional", "Total": total_sn})
+
+            df_regimes = pd.DataFrame(dados)
+
+            # --- Gráfico ÚNICO: Total em COLUNAS, compacto e centralizado ---
+            # largura proporcional ao nº de barras, mas com limites para não "esticar"
+            n = len(df_regimes)
+            largura = min(520, max(300, 140 * n))   # mantém compacto
+            altura  = 260
+
+            graf_colunas = (
+                alt.Chart(df_regimes)
+                .mark_bar(size=48, cornerRadiusTopLeft=8, cornerRadiusTopRight=8)
+                .encode(
+                    x=alt.X("Regime:N", title="", axis=alt.Axis(labelAngle=0)),
+                    y=alt.Y("Total:Q", title="Total (R$)", axis=alt.Axis(format=",.0f")),
+                    tooltip=[
+                        alt.Tooltip("Regime:N", title="Regime"),
+                        alt.Tooltip("Total:Q",  title="Total (R$)", format=",.2f"),
+                    ],
+                )
+                .properties(width=largura, height=altura)
+            )
+            labels_total = graf_colunas.mark_text(
+                dy=-8  # acima das barras
+            ).encode(text=alt.Text("Total:Q", format=",.2f"))
+
+            # Centraliza o gráfico usando colunas fantasma (1–auto–1)
+            c1, c2, c3 = st.columns([1, 3, 1])
+            with c1:
+                st.markdown("&nbsp;")  # evita container vazio
+            with c2:
+                st.caption("Total de tributos por regime")
+                st.altair_chart(graf_colunas + labels_total, use_container_width=True)
+            with c3:
+                st.markdown("&nbsp;")  # evita container vazio
+
+
+            # — (Mantido) Detalhe por tributo — ajuda a explicar o "porquê" do total
+            with st.expander("Quebra por tributo (LP x LR)"):
+                breakdown = []
+                def add_breakdown(regime, r):
+                    breakdown.extend([
+                        {"Regime": regime, "Tributo": "PIS",   "Valor": float(r.pis)},
+                        {"Regime": regime, "Tributo": "COFINS","Valor": float(r.cofins)},
+                        {"Regime": regime, "Tributo": "IRPJ",  "Valor": float(r.irpj_total)},
+                        {"Regime": regime, "Tributo": "CSLL",  "Valor": float(r.csll)},
+                        {"Regime": regime, "Tributo": "INSS",  "Valor": float(r.inss)},
+                    ])
+                    if empresa_de_servicos(entradas):
+                        breakdown.append({"Regime": regime, "Tributo": "ISS", "Valor": float(r.iss)})
+                    breakdown.append({"Regime": regime, "Tributo": "ICMS", "Valor": float(r.icms_devido)})
+                add_breakdown("Lucro Presumido", rp)
+                add_breakdown("Lucro Real", rr)
+
+                df_bk = pd.DataFrame(breakdown)
+                chart_stack = (
+                    alt.Chart(df_bk)
+                    .mark_bar()
+                    .encode(
+                        x=alt.X("Valor:Q", title="Total (R$)", axis=alt.Axis(format=",.0f")),
+                        y=alt.Y("Regime:N", title=""),
+                        color=alt.Color("Tributo:N", title="Tributo"),
+                        tooltip=[
+                            alt.Tooltip("Regime:N",  title="Regime"),
+                            alt.Tooltip("Tributo:N", title="Tributo"),
+                            alt.Tooltip("Valor:Q",   title="Valor (R$)", format=",.2f"),
+                        ],
+                    )
+                    .properties(height=max(140, 64 * 2))
+                )
+                st.altair_chart(chart_stack, use_container_width=True)
+          
+
 
         st.divider()
         st.subheader("Exportar Relatório")
+
         excel_bytes = gerar_excel(rp, rr, entradas, periodo, sn=st.session_state.get("res_simples", None))
-        pdf_bytes = gerar_pdf(rp, rr, entradas, sn=st.session_state.get("res_simples", None))
+        pdf_bytes   = gerar_pdf(rp, rr, entradas, sn=st.session_state.get("res_simples", None))
+
         left, right = st.columns(2)
         with left:
-            st.download_button("⬇️ Baixar Excel", data=excel_bytes, file_name="relatorio_calculo_tributario.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+            st.download_button("⬇️ Baixar Excel", data=excel_bytes,
+                            file_name="relatorio_calculo_tributario.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                            use_container_width=True)
         with right:
-            st.download_button("⬇️ Baixar PDF", data=pdf_bytes, file_name="relatorio_calculo_tributario.pdf",
-                               mime="application/pdf", use_container_width=True)
+            st.download_button("⬇️ Baixar PDF", data=pdf_bytes,
+                            file_name="relatorio_calculo_tributario.pdf",
+                            mime="application/pdf",
+                            use_container_width=True)
+
 
     with st.expander("Notas e Premissas"):
         st.markdown("""
@@ -1347,4 +1665,5 @@ if __name__ == "__main__":
     if "--selftest" in sys.argv:
         _run_self_tests()
     else:
-        ui()
+        _ = ui()   # evita que o Streamlit escreva "None" na tela
+
