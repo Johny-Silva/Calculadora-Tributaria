@@ -18,7 +18,6 @@ import pandas as pd
 import streamlit as st
 from streamlit.components.v1 import html as st_html
 
-import json
 from functools import lru_cache
 import altair as alt
 import numpy as np
@@ -43,8 +42,6 @@ PERIODO_TIPO = Literal["Mensal", "Trimestral", "Anual", "Personalizado"]
 # ============================
 # Utilidades
 # ============================
-
-import numpy as np
 
 def normalize_df_for_streamlit(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -254,25 +251,43 @@ def inject_currency_focus_script():
     st_html(script, height=0)
 
 def set_sidebar_style(width_px: int = SIDEBAR_WIDTH_PX, compact_gap_px: int = 6):
-    st.markdown("""
+    st.markdown(f"""
 <style>
+  /* ===== Sidebar: largura + borda ===== */
+  [data-testid="stSidebar"] {{
+    min-width: {width_px}px !important;
+    max-width: {width_px}px !important;
+    border-right: 1px solid #e7eef5;
+  }}
+  [data-testid="stSidebar"] > div {{
+    width: {width_px}px !important;
+  }}
+
+  /* Centraliza QUALQUER <img> dentro da sidebar (inclui a logo) */
+  [data-testid="stSidebar"] img {{
+    display: block;
+    margin-left: auto;
+    margin-right: auto;
+  }}
+
   /* título e separadores */
-  h1, h2, h3 { letter-spacing: .2px; }
-  hr { border-top: 1px solid #e7eef5; }
+  h1, h2, h3 {{ letter-spacing: .2px; }}
+  hr {{ border-top: 1px solid #e7eef5; }}
 
   /* botões */
-  button[kind="primary"] { border-radius: 12px; }
-  .stDownloadButton button { border-radius: 12px; }
+  button[kind="primary"] {{ border-radius: 12px; }}
+  .stDownloadButton button {{ border-radius: 12px; }}
 
   /* métricas: bordas suaves */
-  div[data-testid="stMetric"] {
-    padding: 8px 20px; align-items: center;border: 2px solid #eef2f7; border-radius: 12px;
-  }
+  div[data-testid="stMetric"] {{
+    padding: 8px 20px; align-items: center; border: 2px solid #eef2f7; border-radius: 12px;
+  }}
 
   /* tabelas */
-  .stDataFrame td, .stDataFrame th { font-size: 0.95rem; }
+  .stDataFrame td, .stDataFrame th {{ font-size: 0.95rem; }}
 </style>
 """, unsafe_allow_html=True)
+
 
 def limite_irpj(periodo: PERIODO_TIPO, meses_personalizado: int) -> float:
     if periodo == "Mensal": return 20000.0
@@ -353,13 +368,22 @@ class Entradas:
     icms_creditos: float
     icms_percentual_st: float
     zerar_pis_cofins_icms: bool = False
-    
-    
+    incide_iss_personalizado: bool = False
+     
     inss_aliquota: float = INSS_PATRONAL_ALIQ_DEFAULT
 
 def empresa_de_servicos(e: Entradas) -> bool:
-    """Considera serviço quando a atividade é 'Serviços...' ou quando marcou 'só serviços (sem ICMS)'."""
-    return str(e.atividade or "").startswith("Serviços") or bool(e.servicos_sem_icms)
+    """
+    - 'Serviços (...)' => aplica ISS.
+    - 'Personalizado'  => aplica se incide_iss_personalizado for True.
+    - Caso a empresa seja "só serviços (sem ICMS)" => aplica ISS também.
+    """
+    atv = str(e.atividade or "")
+    if atv.startswith("Serviços"):
+        return True
+    if atv.startswith("Personalizado"):
+        return bool(getattr(e, "incide_iss_personalizado", False))
+    return bool(e.servicos_sem_icms)
 
 @dataclass
 class ResultadoRegime:
@@ -586,7 +610,7 @@ def calcular_simples(inp: SimplesInput):
 # Exportadores
 # ============================
 
-import numpy as np
+
 
 def _df_detalhamento(e: Entradas, r: ResultadoRegime, periodo: PERIODO_TIPO, regime_nome: str) -> pd.DataFrame:
     if regime_nome == "Lucro Presumido":
@@ -635,7 +659,7 @@ def gerar_excel(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas, periodo: 
     "Lucro Real": [rr.pis, rr.cofins, rr.irpj_total, rr.csll, rr.inss, rr.iss, rr.icms_devido, rr.total_impostos, rr.carga_efetiva_sobre_receita],
     }
     
-    if sn is not np.nan:
+    if sn is not None:
         cols["Simples Nacional"] = [
             "", "", "", "", "", "", "",
             sn.get("das_total_com_difal", sn["das_mes"]),
@@ -1027,6 +1051,8 @@ def ui() -> None:
     set_sidebar_style(SIDEBAR_WIDTH_PX, compact_gap_px=6)
 
     with st.sidebar:
+        st.image("Logo-Azienda.png", width=300)
+        st.markdown("<div style='text-align:center; font-weight:700; margin-bottom:.5rem'></div>", unsafe_allow_html=True)
         st.header("Parâmetros Gerais")
         periodo = st.selectbox("Período de apuração", ["Mensal", "Trimestral", "Anual", "Personalizado"], index=0)
         meses_personalizado = 0
@@ -1257,6 +1283,14 @@ def ui() -> None:
         else:
             presumido_irpj_base = st.number_input("Base Presumida IRPJ (%)", 0.0, 100.0, 8.0, 0.5) / 100.0
             presumido_csll_base = st.number_input("Base Presumida CSLL (%)", 0.0, 100.0, 12.0, 0.5) / 100.0
+       
+        incide_iss_personalizado = False
+        if atividade.startswith("Personalizado"):
+            incide_iss_personalizado = st.checkbox(
+                "Incide ISS?",
+                value=False,
+                help="Marque se a atividade personalizada tiver incidência de ISS."
+        )
 
         # NOVO — modo isenção setorial (ex.: livros)
         st.header("Isenção PIS/COFINS/ICMS")
@@ -1322,7 +1356,7 @@ def ui() -> None:
     despesas_totais=despesas_totais, energia_eletrica=energia, aluguel=aluguel,
     servicos_sem_icms=servicos_sem_icms, receita_icms=receita_icms,
     icms_aliquota=icms_aliquota, icms_creditos=icms_creditos, icms_percentual_st=icms_percentual_st,
-    zerar_pis_cofins_icms=zerar_pis_cofins_icms,
+    zerar_pis_cofins_icms=zerar_pis_cofins_icms, incide_iss_personalizado=incide_iss_personalizado,
 )
 
 
@@ -1504,7 +1538,7 @@ def ui() -> None:
                 total_simples = float(sn.get("das_total_com_difal", sn["das_mes"]))
                 carga_simples = (total_simples / sn["receita_mes"]) if sn.get("receita_mes", 0) > 0 else 0.0
                 # 7 NaN (linhas não monetárias do Simples), depois Total e Carga
-                import numpy as np
+                
                 comp_dict["Simples Nacional"] = [np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan,
                                                 total_simples, float(carga_simples)]
 
@@ -1608,9 +1642,8 @@ def ui() -> None:
                     .properties(height=max(140, 64 * 2))
                 )
                 st.altair_chart(chart_stack, use_container_width=True)
-          
 
-
+            
         st.divider()
         st.subheader("Exportar Relatório")
 
