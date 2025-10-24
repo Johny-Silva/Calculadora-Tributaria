@@ -14,6 +14,7 @@ import json
 from dataclasses import dataclass
 from typing import Literal, Tuple
 
+
 import pandas as pd
 import streamlit as st
 from streamlit.components.v1 import html as st_html
@@ -56,6 +57,32 @@ class ReformaParams:
 # ============================
 # Utilidades
 # ============================
+
+def _soma_positivos(valores) -> float:
+    total = 0.0
+    for v in valores:
+        try:
+            x = float(v or 0.0)
+            if x > 0:
+                total += x
+        except Exception:
+            pass
+    return total
+
+def total_a_pagar_regime(r, e, modo="atual") -> float:
+    """
+    Soma apenas tributos > 0 (a pagar) para o regime informado.
+    """
+    if modo == "reforma":
+        componentes = [r.cbs, r.ibs, r.imposto_seletivo, r.irpj_total, r.csll, r.inss]
+        return _soma_positivos(componentes)
+    componentes = [r.pis, r.cofins, r.irpj_total, r.csll, r.inss]
+    if empresa_de_servicos(e):
+        componentes.append(r.iss)
+    componentes.append(max(r.icms_devido or 0.0, 0.0))
+    return _soma_positivos(componentes)
+
+
 
 def normalize_df_for_streamlit(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -100,6 +127,7 @@ def parse_brl_or_number(x) -> float:
     if isinstance(x, (int, float)):
         return float(x)
     return brl_to_float(str(x))
+
 
 
 def format_brl(valor: float) -> str:
@@ -712,8 +740,13 @@ def calcular_simples(inp: SimplesInput):
 
 def _df_detalhamento(e: Entradas, r: ResultadoRegime, periodo: PERIODO_TIPO, regime_nome: str,
                      modo: Literal["atual","reforma"]="atual") -> pd.DataFrame:
+    """
+    Gera o DataFrame de detalhamento por tributo para exibição/exports.
+    Em 'TOTAL' soma apenas valores positivos (a pagar).
+    """
     if modo == "atual":
-        if regime_nome == "Lucro Presumido":
+        # alíquotas de referência
+        if "Presumido" in regime_nome:
             aliq_pis = PIS_PRESUMIDO
             aliq_cofins = COFINS_PRESUMIDO
         else:
@@ -733,6 +766,8 @@ def _df_detalhamento(e: Entradas, r: ResultadoRegime, periodo: PERIODO_TIPO, reg
         ]
         if empresa_de_servicos(e):
             linhas.append({"Tributo": "ISS", "Base": e.receita_bruta, "Crédito": 0.0, "Alíquota": ISS_ALIQ, "Valor": r.iss})
+
+        # ICMS (simplificado)
         linhas.append({
             "Tributo": "ICMS",
             "Base": (0.0 if e.servicos_sem_icms else e.receita_icms * (1.0 - e.icms_percentual_st)),
@@ -740,11 +775,13 @@ def _df_detalhamento(e: Entradas, r: ResultadoRegime, periodo: PERIODO_TIPO, reg
             "Alíquota": e.icms_aliquota,
             "Valor": r.icms_devido
         })
-        linhas.append({"Tributo": "TOTAL", "Base": np.nan, "Crédito": np.nan, "Alíquota": np.nan, "Valor": r.total_impostos})
-        df = pd.DataFrame(linhas)
-        return normalize_df_for_streamlit(df)
 
-    # ----- modo Reforma -----
+        total_a_pagar = _soma_positivos([row["Valor"] for row in linhas] + [0.0])
+        linhas.append({"Tributo": "TOTAL", "Base": np.nan, "Crédito": np.nan, "Alíquota": np.nan, "Valor": total_a_pagar})
+
+        return pd.DataFrame(linhas, columns=["Tributo", "Base", "Crédito", "Alíquota", "Valor"])
+
+    # ===== modo "reforma" =====
     lim = limite_irpj(periodo, e.meses_personalizado)
     base_exced = max(r.base_irpj - lim, 0.0)
 
@@ -752,7 +789,7 @@ def _df_detalhamento(e: Entradas, r: ResultadoRegime, periodo: PERIODO_TIPO, reg
         {"Tributo": "CBS", "Base": r.base_cbs, "Crédito": r.credito_cbs, "Alíquota": np.nan, "Valor": r.cbs},
         {"Tributo": "IBS", "Base": r.base_ibs, "Crédito": r.credito_ibs, "Alíquota": np.nan, "Valor": r.ibs},
     ]
-    if r.imposto_seletivo > 0:
+    if float(getattr(r, "imposto_seletivo", 0.0) or 0.0) > 0:
         linhas.append({"Tributo": "Imposto Seletivo (IS)", "Base": np.nan, "Crédito": np.nan, "Alíquota": np.nan, "Valor": r.imposto_seletivo})
 
     linhas.extend([
@@ -760,10 +797,13 @@ def _df_detalhamento(e: Entradas, r: ResultadoRegime, periodo: PERIODO_TIPO, reg
         {"Tributo": "IRPJ Adicional", "Base": base_exced, "Crédito": 0.0, "Alíquota": IRPJ_ADICIONAL_ALIQ, "Valor": r.irpj_adicional},
         {"Tributo": "CSLL", "Base": r.base_csll, "Crédito": 0.0, "Alíquota": CSLL_ALIQ, "Valor": r.csll},
         {"Tributo": "INSS", "Base": e.folha_inss_base, "Crédito": 0.0, "Alíquota": e.inss_aliquota, "Valor": r.inss},
-        {"Tributo": "TOTAL", "Base": np.nan, "Crédito": np.nan, "Alíquota": np.nan, "Valor": r.total_impostos},
     ])
-    df = pd.DataFrame(linhas)
-    return normalize_df_for_streamlit(df)
+
+    total_a_pagar = _soma_positivos([row["Valor"] for row in linhas])
+    linhas.append({"Tributo": "TOTAL", "Base": np.nan, "Crédito": np.nan, "Alíquota": np.nan, "Valor": total_a_pagar})
+
+    return pd.DataFrame(linhas, columns=["Tributo", "Base", "Crédito", "Alíquota", "Valor"])
+
 
 
     
@@ -775,19 +815,25 @@ def gerar_excel(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas, periodo: 
     # --- Resumo (Comparativo) para o Excel, com tamanhos alinhados por modo ---
     if modo == "reforma":
         impostos_header = ["CBS","IBS","IS","IRPJ","CSLL","INSS","Total","Carga sobre Receita"]
+        total_lp_pos = total_a_pagar_regime(rp, e, modo="reforma")
+        total_lr_pos = total_a_pagar_regime(rr, e, modo="reforma")
+        carga_lp = (total_lp_pos / e.receita_bruta) if e.receita_bruta > 0 else 0.0
+        carga_lr = (total_lr_pos / e.receita_bruta) if e.receita_bruta > 0 else 0.0
+
         cols = {
-            "Imposto": impostos_header,
+            "Imposto": ["CBS","IBS","IS","IRPJ","CSLL","INSS","Total","Carga sobre Receita"],
             "Lucro Presumido": [
                 float(rp.cbs), float(rp.ibs), float(rp.imposto_seletivo),
                 float(rp.irpj_total), float(rp.csll), float(rp.inss),
-                float(rp.total_impostos), float(rp.carga_efetiva_sobre_receita),
+                float(total_lp_pos), float(carga_lp),
             ],
             "Lucro Real": [
                 float(rr.cbs), float(rr.ibs), float(rr.imposto_seletivo),
                 float(rr.irpj_total), float(rr.csll), float(rr.inss),
-                float(rr.total_impostos), float(rr.carga_efetiva_sobre_receita),
+                float(total_lr_pos), float(carga_lr),
             ],
         }
+
         if isinstance(sn, dict):
             total_simples = float(sn.get("das_total_com_difal", sn.get("das_mes", 0.0)))
             receita_mes_sn = float(sn.get("receita_mes", 0.0))
@@ -799,19 +845,25 @@ def gerar_excel(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas, periodo: 
             ]
     else:
         impostos_header = ["PIS","COFINS","IRPJ","CSLL","INSS","ISS","ICMS","Total","Carga sobre Receita"]
+        total_lp_pos = total_a_pagar_regime(rp, e, modo="atual")
+        total_lr_pos = total_a_pagar_regime(rr, e, modo="atual")
+        carga_lp = (total_lp_pos / e.receita_bruta) if e.receita_bruta > 0 else 0.0
+        carga_lr = (total_lr_pos / e.receita_bruta) if e.receita_bruta > 0 else 0.0
+
         cols = {
-            "Imposto": impostos_header,
+            "Imposto": ["PIS","COFINS","IRPJ","CSLL","INSS","ISS","ICMS","Total","Carga sobre Receita"],
             "Lucro Presumido": [
                 float(rp.pis), float(rp.cofins), float(rp.irpj_total), float(rp.csll),
-                float(rp.inss), float(rp.iss), float(rp.icms_devido),
-                float(rp.total_impostos), float(rp.carga_efetiva_sobre_receita),
+                float(rp.inss), float(rp.iss), float(max(rp.icms_devido,0.0)),
+                float(total_lp_pos), float(carga_lp),
             ],
             "Lucro Real": [
                 float(rr.pis), float(rr.cofins), float(rr.irpj_total), float(rr.csll),
-                float(rr.inss), float(rr.iss), float(rr.icms_devido),
-                float(rr.total_impostos), float(rr.carga_efetiva_sobre_receita),
+                float(rr.inss), float(rr.iss), float(max(rr.icms_devido,0.0)),
+                float(total_lr_pos), float(carga_lr),
             ],
         }
+
         if isinstance(sn, dict):
             total_simples = float(sn.get("das_total_com_difal", sn.get("das_mes", 0.0)))
             receita_mes_sn = float(sn.get("receita_mes", 0.0))
@@ -924,10 +976,15 @@ def gerar_excel(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas, periodo: 
         start_col = 7    # coluna H (0-based)
 
         regimes = ["Lucro Presumido", "Lucro Real"]
-        totais  = [float(rp.total_impostos), float(rr.total_impostos)]
+        # usar apenas valores a pagar conforme 'modo'
+        _is_reforma = (modo == "reforma")
+        tot_lp_pos = total_a_pagar_regime(rp, e, modo=("reforma" if _is_reforma else "atual"))
+        tot_lr_pos = total_a_pagar_regime(rr, e, modo=("reforma" if _is_reforma else "atual"))
+        totais  = [float(tot_lp_pos), float(tot_lr_pos)]
         if sn is not None:
             regimes.append("Simples Nacional")
             totais.append(float(sn.get("das_total_com_difal", sn["das_mes"])))
+
 
         # header
         ws.write(start_row,   start_col,     "Regime", header_fmt)
@@ -1128,8 +1185,10 @@ def gerar_pdf(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas,
                 linhas.append(("ISS", r.iss))
             linhas.append(("ICMS Devido", r.icms_devido))
 
-        linhas += [("Total", r.total_impostos),
-                ("Carga sobre Receita", f"{r.carga_efetiva_sobre_receita*100:.2f}%")]
+        # Substitui a linha "Total" para usar apenas valores positivos (a pagar)
+        total_pos = total_a_pagar_regime(r, e, modo="reforma" if modo=="reforma" else "atual")
+        linhas += [("Total", total_pos), ("Carga sobre Receita", f"{(total_pos / (e.receita_bruta or 1.0))*100:.2f}%")]
+
         for nome, val in linhas:
             txt = f"{nome}: {format_brl(float(val))}" if isinstance(val, (int, float)) else f"{nome}: {val}"
             c.drawString(2.5*cm, y, txt); y -= 0.38*cm
@@ -1177,10 +1236,13 @@ def gerar_pdf(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas,
             if y < 3*cm: c.showPage(); y = h - 2*cm; c.setFont("Helvetica", 10)
 
     # === GRÁFICO FINAL: Total de tributos por regime ===
-    pares = [("Lucro Pres.", float(rp.total_impostos)),
-             ("Lucro Real", float(rr.total_impostos))]
+    pares = [
+        ("Lucro Pres.", float(total_a_pagar_regime(rp, e, modo=("reforma" if modo=="reforma" else "atual")))),
+        ("Lucro Real", float(total_a_pagar_regime(rr, e, modo=("reforma" if modo=="reforma" else "atual")))),
+    ]
     if sn is not None:
         pares.append(("Simples", float(sn.get("das_total_com_difal", sn["das_mes"]))))
+
 
     # se faltar espaço na página corrente, abre nova página
     if y < 9*cm:
@@ -1642,6 +1704,12 @@ def ui() -> None:
         scenario_badge(modo_exec, fase_exec, cbs_exec, ibs_exec)
 
         kpi_cols = st.columns(3 if tem_sn else 2)
+        # total "a pagar" por regime, conforme cenário vigente
+        modo_exec = st.session_state.get("modo_cenario", "atual")
+        total_lp_pos = total_a_pagar_regime(rp, entradas, modo=("reforma" if modo_exec=="reforma" else "atual"))
+        total_lr_pos = total_a_pagar_regime(rr, entradas, modo=("reforma" if modo_exec=="reforma" else "atual"))
+        carga_lp_pos = (total_lp_pos / entradas.receita_bruta) if entradas.receita_bruta > 0 else 0.0
+        carga_lr_pos = (total_lr_pos / entradas.receita_bruta) if entradas.receita_bruta > 0 else 0.0
         with kpi_cols[0]:
             st.subheader("Lucro Presumido")
             st.metric("Total de Impostos", format_brl(rp.total_impostos))
@@ -1773,21 +1841,21 @@ def ui() -> None:
 
             if modo == "reforma":
                 # 8 linhas no cabeçalho "Imposto"
-                impostos_header = ["CBS","IBS","IS","IRPJ","CSLL","INSS","Total","Carga sobre Receita"]
+                total_lp_pos = total_a_pagar_regime(rp, entradas, modo="reforma")
+                total_lr_pos = total_a_pagar_regime(rr, entradas, modo="reforma")
+                carga_lp = (total_lp_pos / entradas.receita_bruta) if entradas.receita_bruta > 0 else 0.0
+                carga_lr = (total_lr_pos / entradas.receita_bruta) if entradas.receita_bruta > 0 else 0.0
 
                 comp_dict = {
-                    "Imposto": impostos_header,
-                    "Lucro Presumido": [
-                        float(rp.cbs), float(rp.ibs), float(rp.imposto_seletivo),
-                        float(rp.irpj_total), float(rp.csll), float(rp.inss),
-                        float(rp.total_impostos), float(rp.carga_efetiva_sobre_receita),
-                    ],
-                    "Lucro Real": [
-                        float(rr.cbs), float(rr.ibs), float(rr.imposto_seletivo),
-                        float(rr.irpj_total), float(rr.csll), float(rr.inss),
-                        float(rr.total_impostos), float(rr.carga_efetiva_sobre_receita),
-                    ],
+                    "Imposto": ["CBS","IBS","IS","IRPJ","CSLL","INSS","Total","Carga sobre Receita"],
+                    "Lucro Presumido": [float(rp.cbs), float(rp.ibs), float(rp.imposto_seletivo),
+                                        float(rp.irpj_total), float(rp.csll), float(rp.inss),
+                                        float(total_lp_pos), float(carga_lp)],
+                    "Lucro Real": [float(rr.cbs), float(rr.ibs), float(rr.imposto_seletivo),
+                                   float(rr.irpj_total), float(rr.csll), float(rr.inss),
+                                   float(total_lr_pos), float(carga_lr)],
                 }
+
 
                 if tem_sn and isinstance(sn_state, dict):
                     total_simples = float(sn_state.get("das_total_com_difal", sn_state["das_mes"]))
@@ -1805,20 +1873,21 @@ def ui() -> None:
                     ]
             else:
                 # modo "atual" (formato de 9 linhas)
-                impostos_header = ["PIS","COFINS","IRPJ","CSLL","INSS","ISS","ICMS","Total","Carga sobre Receita"]
+                total_lp_pos = total_a_pagar_regime(rp, entradas, modo="atual")
+                total_lr_pos = total_a_pagar_regime(rr, entradas, modo="atual")
+                carga_lp = (total_lp_pos / entradas.receita_bruta) if entradas.receita_bruta > 0 else 0.0
+                carga_lr = (total_lr_pos / entradas.receita_bruta) if entradas.receita_bruta > 0 else 0.0
+
                 comp_dict = {
-                    "Imposto": impostos_header,
-                    "Lucro Presumido": [
-                        float(rp.pis), float(rp.cofins), float(rp.irpj_total), float(rp.csll),
-                        float(rp.inss), float(rp.iss), float(rp.icms_devido),
-                        float(rp.total_impostos), float(rp.carga_efetiva_sobre_receita)
-                    ],
-                    "Lucro Real": [
-                        float(rr.pis), float(rr.cofins), float(rr.irpj_total), float(rr.csll),
-                        float(rr.inss), float(rr.iss), float(rr.icms_devido),
-                        float(rr.total_impostos), float(rr.carga_efetiva_sobre_receita)
-                    ],
+                    "Imposto": ["PIS","COFINS","IRPJ","CSLL","INSS","ISS","ICMS","Total","Carga sobre Receita"],
+                    "Lucro Presumido": [float(rp.pis), float(rp.cofins), float(rp.irpj_total), float(rp.csll),
+                                        float(rp.inss), float(rp.iss), float(max(rp.icms_devido,0.0)),
+                                        float(total_lp_pos), float(carga_lp)],
+                    "Lucro Real": [float(rr.pis), float(rr.cofins), float(rr.irpj_total), float(rr.csll),
+                                   float(rr.inss), float(rr.iss), float(max(rr.icms_devido,0.0)),
+                                   float(total_lr_pos), float(carga_lr)],
                 }
+
 
                 if tem_sn and isinstance(sn_state, dict):
                     total_simples = float(sn_state.get("das_total_com_difal", sn_state["das_mes"]))
@@ -1855,16 +1924,17 @@ def ui() -> None:
             # === NOVO: Gráficos de comparação ===
             st.markdown("### 📈 Visualizações — Comparativo entre regimes")
 
-            # Base de dados: Regime / Total / (Carga opcional – não vamos mostrar aqui)
+            # Base de dados (apenas valores a pagar)
             dados = [
-                {"Regime": "Lucro Presumido", "Total": float(rp.total_impostos)},
-                {"Regime": "Lucro Real",      "Total": float(rr.total_impostos)},
+                {"Regime": "Lucro Presumido", "Total": float(total_a_pagar_regime(rp, entradas, modo=("reforma" if modo_exec=="reforma" else "atual")))}
+                ,{"Regime": "Lucro Real", "Total": float(total_a_pagar_regime(rr, entradas, modo=("reforma" if modo_exec=="reforma" else "atual")))}
             ]
             if isinstance(sn, dict) and sn:
                 total_sn = float(sn.get("das_total_com_difal", sn["das_mes"]))
                 dados.append({"Regime": "Simples Nacional", "Total": total_sn})
 
             df_regimes = pd.DataFrame(dados)
+
 
             # --- Gráfico ÚNICO: Total em COLUNAS, compacto e centralizado ---
             # largura proporcional ao nº de barras, mas com limites para não "esticar"
@@ -1907,26 +1977,27 @@ def ui() -> None:
 
                 def add_breakdown_atual(regime, r):
                     breakdown.extend([
-                        {"Regime": regime, "Tributo": "PIS",    "Valor": float(r.pis)},
-                        {"Regime": regime, "Tributo": "COFINS", "Valor": float(r.cofins)},
-                        {"Regime": regime, "Tributo": "IRPJ",   "Valor": float(r.irpj_total)},
-                        {"Regime": regime, "Tributo": "CSLL",   "Valor": float(r.csll)},
-                        {"Regime": regime, "Tributo": "INSS",   "Valor": float(r.inss)},
+                        {"Regime": regime, "Tributo": "PIS",    "Valor": max(float(r.pis), 0.0)},
+                        {"Regime": regime, "Tributo": "COFINS", "Valor": max(float(r.cofins), 0.0)},
+                        {"Regime": regime, "Tributo": "IRPJ",   "Valor": max(float(r.irpj_total), 0.0)},
+                        {"Regime": regime, "Tributo": "CSLL",   "Valor": max(float(r.csll), 0.0)},
+                        {"Regime": regime, "Tributo": "INSS",   "Valor": max(float(r.inss), 0.0)},
                     ])
                     if empresa_de_servicos(entradas):
-                        breakdown.append({"Regime": regime, "Tributo": "ISS", "Valor": float(r.iss)})
-                    breakdown.append({"Regime": regime, "Tributo": "ICMS", "Valor": float(r.icms_devido)})
+                        breakdown.append({"Regime": regime, "Tributo": "ISS", "Valor": max(float(r.iss), 0.0)})
+                    breakdown.append({"Regime": regime, "Tributo": "ICMS", "Valor": max(float(r.icms_devido), 0.0)})
 
                 def add_breakdown_reforma(regime, r):
                     breakdown.extend([
-                        {"Regime": regime, "Tributo": "CBS",    "Valor": float(r.cbs)},
-                        {"Regime": regime, "Tributo": "IBS",    "Valor": float(r.ibs)},
-                        {"Regime": regime, "Tributo": "IRPJ",   "Valor": float(r.irpj_total)},
-                        {"Regime": regime, "Tributo": "CSLL",   "Valor": float(r.csll)},
-                        {"Regime": regime, "Tributo": "INSS",   "Valor": float(r.inss)},
+                        {"Regime": regime, "Tributo": "CBS",  "Valor": max(float(r.cbs), 0.0)},
+                        {"Regime": regime, "Tributo": "IBS",  "Valor": max(float(r.ibs), 0.0)},
+                        {"Regime": regime, "Tributo": "IRPJ", "Valor": max(float(r.irpj_total), 0.0)},
+                        {"Regime": regime, "Tributo": "CSLL", "Valor": max(float(r.csll), 0.0)},
+                        {"Regime": regime, "Tributo": "INSS", "Valor": max(float(r.inss), 0.0)},
                     ])
                     if float(getattr(r, "imposto_seletivo", 0.0) or 0.0) > 0:
-                        breakdown.append({"Regime": regime, "Tributo": "IS", "Valor": float(r.imposto_seletivo)})
+                        breakdown.append({"Regime": regime, "Tributo": "IS", "Valor": max(float(r.imposto_seletivo), 0.0)})
+
 
                 if modo_exec == "reforma":
                     add_breakdown_reforma("Lucro Presumido", rp)
