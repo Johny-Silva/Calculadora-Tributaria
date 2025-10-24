@@ -1039,17 +1039,17 @@ def gerar_excel(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas, periodo: 
 
                 {"Item": "DIFAL Vendas — Base (soma)", "": sn.get("difal_base_v", 0.0)},
                 {"Item": "DIFAL Vendas — Alíquotas / UFs", "": "", "Info": "múltiplas linhas"},
-                {"Item": "DIFAL Vendas — Parcela (Δ aliq × base)", "": sn.get("difal_parte_v", 0.0)},
-                {"Item": "DIFAL Vendas — FCP (R$)", "": sn.get("fcp_valor_v", 0.0)},
+                #{"Item": "DIFAL Vendas — Parcela (aliq × base)", "": sn.get("difal_parte_v", 0.0)},
+                #{"Item": "DIFAL Vendas — FCP (R$)", "": sn.get("fcp_valor_v", 0.0)},
                 {"Item": "DIFAL Vendas — Total", "": sn.get("difal_total_v", 0.0)},
 
                 {"Item": "DIFAL Compras — Base (soma)", "": sn.get("difal_base_c", 0.0)},
                 {"Item": "DIFAL Compras — Alíquotas / UFs", "": "", "Info": "múltiplas linhas"},
-                {"Item": "DIFAL Compras — Parcela (Δ aliq × base)", "": sn.get("difal_parte_c", 0.0)},
-                {"Item": "DIFAL Compras — FCP (R$)", "": sn.get("fcp_valor_c", 0.0)},
+                {"Item": "DIFAL Compras — Parcela (aliq × base)", "": sn.get("difal_parte_c", 0.0)},
+                #{"Item": "DIFAL Compras — FCP (R$)", "": sn.get("fcp_valor_c", 0.0)},
                 {"Item": "DIFAL Compras — Total", "": sn.get("difal_total_c", 0.0)},
 
-                {"Item": f"Total Simples ({sn.get('criterio_soma_difal','Nenhum')})",
+                {"Item": f"Total Simples ({sn.get('criterio_soma_difal','')})",
                 "Valor": sn.get("das_total_com_difal", sn["das_mes"])},
             ])
 
@@ -1219,17 +1219,17 @@ def gerar_pdf(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas,
             ("DIFAL Vendas — Base (soma)", format_brl(sn.get("difal_base_v", 0.0))),
             ("DIFAL Vendas — Alíquotas / UFs", "múltiplas linhas"),
             ("DIFAL Vendas — Parcela (aliq × base)", format_brl(sn.get("difal_parte_v", 0.0))),
-            ("DIFAL Vendas — FCP (R$)", format_brl(sn.get("fcp_valor_v", 0.0))),
+            #("DIFAL Vendas — FCP (R$)", format_brl(sn.get("fcp_valor_v", 0.0))),
             ("DIFAL Vendas — Total", format_brl(sn.get("difal_total_v", 0.0))),
 
             # Compras (agregado)
             ("DIFAL Compras — Base (soma)", format_brl(sn.get("difal_base_c", 0.0))),
             ("DIFAL Compras — Alíquotas / UFs", "múltiplas linhas"),
             ("DIFAL Compras — Parcela (aliq × base)", format_brl(sn.get("difal_parte_c", 0.0))),
-            ("DIFAL Compras — FCP (R$)", format_brl(sn.get("fcp_valor_c", 0.0))),
+            #("DIFAL Compras — FCP (R$)", format_brl(sn.get("fcp_valor_c", 0.0))),
             ("DIFAL Compras — Total", format_brl(sn.get("difal_total_c", 0.0))),
 
-            (f"Total Simples ({sn.get('criterio_soma_difal','Nenhum')})", format_brl(sn.get("das_total_com_difal", sn["das_mes"]))),
+            (f"Total Simples ({sn.get('criterio_soma_difal','')})", format_brl(sn.get("das_total_com_difal", sn["das_mes"]))),
         ]
         for nome, val in linhas_sn:
             c.drawString(2.5*cm, y, f"{nome}: {val}"); y -= 0.38*cm
@@ -1796,17 +1796,17 @@ def ui() -> None:
 
                 {"Item": "DIFAL Vendas — Base (soma)", "Valor": sn.get("difal_base_v", 0.0)},
                 {"Item": "DIFAL Vendas — Alíquotas / UFs", "Valor": "", "Info": "múltiplas linhas"},
-                {"Item": "DIFAL Vendas — Parcela (Δ aliq × base)", "Valor": sn.get("difal_parte_v", 0.0)},
-                {"Item": "DIFAL Vendas — FCP (R$)", "Valor": sn.get("fcp_valor_v", 0.0)},
+                {"Item": "DIFAL Vendas — Parcela (aliq × base)", "Valor": sn.get("difal_parte_v", 0.0)},
+                #{"Item": "DIFAL Vendas — FCP (R$)", "Valor": sn.get("fcp_valor_v", 0.0)},
                 {"Item": "DIFAL Vendas — Total", "Valor": sn.get("difal_total_v", 0.0)},
 
                 {"Item": "DIFAL Compras — Base (soma)", "Valor": sn.get("difal_base_c", 0.0)},
                 {"Item": "DIFAL Compras — Alíquotas / UFs", "Valor": "", "Info": "múltiplas linhas"},
-                {"Item": "DIFAL Compras — Parcela (Δ aliq × base)", "Valor": sn.get("difal_parte_c", 0.0)},
-                {"Item": "DIFAL Compras — FCP (R$)", "Valor": sn.get("fcp_valor_c", 0.0)},
+                {"Item": "DIFAL Compras — Parcela (aliq × base)", "Valor": sn.get("difal_parte_c", 0.0)},
+                #{"Item": "DIFAL Compras — FCP (R$)", "Valor": sn.get("fcp_valor_c", 0.0)},
                 {"Item": "DIFAL Compras — Total", "Valor": sn.get("difal_total_c", 0.0)},
 
-                {"Item": f"Total Simples ({sn.get('criterio_soma_difal','Nenhum')})",
+                {"Item": f"Total Simples ({sn.get('criterio_soma_difal','')})",
                 "Valor": sn.get("das_total_com_difal", sn["das_mes"])},
             ])
 
