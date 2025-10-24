@@ -1703,27 +1703,35 @@ def ui() -> None:
         ibs_exec  = st.session_state.get("reforma_ibs")  if modo_exec == "reforma" else None
         scenario_badge(modo_exec, fase_exec, cbs_exec, ibs_exec)
 
+        # === CARDS / KPIs – sempre com "apenas o que é a pagar" ===
         kpi_cols = st.columns(3 if tem_sn else 2)
-        # total "a pagar" por regime, conforme cenário vigente
+
+        # modo realmente executado (atual vs reforma) — para a função total_a_pagar_regime
         modo_exec = st.session_state.get("modo_cenario", "atual")
-        total_lp_pos = total_a_pagar_regime(rp, entradas, modo=("reforma" if modo_exec=="reforma" else "atual"))
-        total_lr_pos = total_a_pagar_regime(rr, entradas, modo=("reforma" if modo_exec=="reforma" else "atual"))
-        carga_lp_pos = (total_lp_pos / entradas.receita_bruta) if entradas.receita_bruta > 0 else 0.0
-        carga_lr_pos = (total_lr_pos / entradas.receita_bruta) if entradas.receita_bruta > 0 else 0.0
+        _modo = "reforma" if modo_exec == "reforma" else "atual"
+
+        # Totais "a pagar" e carga efetiva (sempre >= 0)
+        lp_total_pos = float(total_a_pagar_regime(rp, entradas, modo=_modo))
+        lr_total_pos = float(total_a_pagar_regime(rr, entradas, modo=_modo))
+        lp_carga_pos = (lp_total_pos / (entradas.receita_bruta or 1.0)) if entradas.receita_bruta > 0 else 0.0
+        lr_carga_pos = (lr_total_pos / (entradas.receita_bruta or 1.0)) if entradas.receita_bruta > 0 else 0.0
+
         with kpi_cols[0]:
             st.subheader("Lucro Presumido")
-            st.metric("Total de Impostos", format_brl(rp.total_impostos))
-            st.metric("Carga Efetiva", format_pct_br(rp.carga_efetiva_sobre_receita))
+            st.metric("Total de Impostos (a pagar)", format_brl(lp_total_pos))
+            st.metric("Carga Efetiva", format_pct_br(lp_carga_pos))
+
         with kpi_cols[1]:
             st.subheader("Lucro Real")
-            st.metric("Total de Impostos", format_brl(rr.total_impostos))
-            st.metric("Carga Efetiva", format_pct_br(rr.carga_efetiva_sobre_receita))
+            st.metric("Total de Impostos (a pagar)", format_brl(lr_total_pos))
+            st.metric("Carga Efetiva", format_pct_br(lr_carga_pos))
+
         if tem_sn and isinstance(sn_state, dict):
             with kpi_cols[2]:
                 st.subheader("Simples Nacional")
                 st.metric("DAS do mês", format_brl(sn_state["das_mes"]))
 
-                # >>> NOVO: só mostra os cartões de DIFAL quando houver valor
+                # Só mostra DIFAL se houver
                 _difal_v = float(sn_state.get("difal_total_v", 0.0) or 0.0)
                 _difal_c = float(sn_state.get("difal_total_c", 0.0) or 0.0)
                 if _difal_v > 0:
@@ -1731,16 +1739,17 @@ def ui() -> None:
                 if _difal_c > 0:
                     st.metric("DIFAL Compras", format_brl(_difal_c))
 
+                # Total conforme critério escolhido
                 st.metric(
                     f"Total ({sn_state.get('criterio_soma_difal','Nenhum')})",
                     format_brl(sn_state.get("das_total_com_difal", sn_state["das_mes"]))
                 )
-                st.metric("Alíquota Efetiva", format_pct_br(sn_state['aliquota_efetiva']))
+                st.metric("Alíquota Efetiva", format_pct_br(sn_state["aliquota_efetiva"]))
 
                 def _safe_txt(x): 
                     return "" if x in (None, np.nan) else str(x)
-
                 st.metric("Anexo", _safe_txt(sn_state.get("anexo")))
+
 
                 
 
