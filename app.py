@@ -811,16 +811,18 @@ def _df_detalhamento(e: Entradas, r: ResultadoRegime, periodo: PERIODO_TIPO, reg
 
 def gerar_excel(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas, periodo: PERIODO_TIPO,
                 sn: dict | None = None, modo: Literal["atual","reforma"]="atual") -> bytes:
-    
+    import io
+    import numpy as np
+    import pandas as pd
+
     # --- Resumo (Comparativo) para o Excel, com tamanhos alinhados por modo ---
     if modo == "reforma":
-        impostos_header = ["CBS","IBS","IS","IRPJ","CSLL","INSS","Total","Carga sobre Receita"]
         total_lp_pos = total_a_pagar_regime(rp, e, modo="reforma")
         total_lr_pos = total_a_pagar_regime(rr, e, modo="reforma")
         carga_lp = (total_lp_pos / e.receita_bruta) if e.receita_bruta > 0 else 0.0
         carga_lr = (total_lr_pos / e.receita_bruta) if e.receita_bruta > 0 else 0.0
 
-        cols = {
+        comp_dict = {
             "Imposto": ["CBS","IBS","IS","IRPJ","CSLL","INSS","Total","Carga sobre Receita"],
             "Lucro Presumido": [
                 float(rp.cbs), float(rp.ibs), float(rp.imposto_seletivo),
@@ -833,24 +835,21 @@ def gerar_excel(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas, periodo: 
                 float(total_lr_pos), float(carga_lr),
             ],
         }
-
         if isinstance(sn, dict):
             total_simples = float(sn.get("das_total_com_difal", sn.get("das_mes", 0.0)))
             receita_mes_sn = float(sn.get("receita_mes", 0.0))
             carga_simples = (total_simples / receita_mes_sn) if receita_mes_sn > 0 else 0.0
-            # Em "reforma" são 8 linhas → preenche com NaN onde não se aplica
-            cols["Simples Nacional"] = [
+            comp_dict["Simples Nacional"] = [
                 np.nan, np.nan, np.nan, np.nan, np.nan, np.nan,
                 total_simples, float(carga_simples)
             ]
     else:
-        impostos_header = ["PIS","COFINS","IRPJ","CSLL","INSS","ISS","ICMS","Total","Carga sobre Receita"]
         total_lp_pos = total_a_pagar_regime(rp, e, modo="atual")
         total_lr_pos = total_a_pagar_regime(rr, e, modo="atual")
         carga_lp = (total_lp_pos / e.receita_bruta) if e.receita_bruta > 0 else 0.0
         carga_lr = (total_lr_pos / e.receita_bruta) if e.receita_bruta > 0 else 0.0
 
-        cols = {
+        comp_dict = {
             "Imposto": ["PIS","COFINS","IRPJ","CSLL","INSS","ISS","ICMS","Total","Carga sobre Receita"],
             "Lucro Presumido": [
                 float(rp.pis), float(rp.cofins), float(rp.irpj_total), float(rp.csll),
@@ -863,24 +862,30 @@ def gerar_excel(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas, periodo: 
                 float(total_lr_pos), float(carga_lr),
             ],
         }
-
         if isinstance(sn, dict):
             total_simples = float(sn.get("das_total_com_difal", sn.get("das_mes", 0.0)))
             receita_mes_sn = float(sn.get("receita_mes", 0.0))
             carga_simples = (total_simples / receita_mes_sn) if receita_mes_sn > 0 else 0.0
-            # Em "atual" são 9 linhas → 7 NaN + Total + Carga
-            cols["Simples Nacional"] = [
+            comp_dict["Simples Nacional"] = [
                 np.nan, np.nan, np.nan, np.nan, np.nan, np.nan, np.nan,
                 total_simples, float(carga_simples)
             ]
 
-    df_comp = pd.DataFrame(cols)
+    df_comp = pd.DataFrame(comp_dict)
 
+    # Detalhamentos LP/LR conforme o modo
+    dflp = _df_detalhamento(
+        e, rp, periodo,
+        "Lucro Presumido" if modo=="atual" else "Lucro Presumido (Reforma)",
+        modo=modo
+    )
+    dflr = _df_detalhamento(
+        e, rr, periodo,
+        "Lucro Real" if modo=="atual" else "Lucro Real (Reforma)",
+        modo=modo
+    )
 
-    dflp = _df_detalhamento(e, rp, periodo, "Lucro Presumido" if modo=="atual" else "Lucro Presumido (Reforma)", modo=modo)
-    dflr = _df_detalhamento(e, rr, periodo, "Lucro Real" if modo=="atual" else "Lucro Real (Reforma)", modo=modo)
-
-    
+    # Descrições para parâmetros
     periodo_desc = e.periodo if e.periodo != "Personalizado" else f"Personalizado ({e.meses_personalizado} meses)"
     if str(e.atividade).startswith("Personalizado"):
         atividade_desc = f"Personalizado (IRPJ {e.presumido_irpj_base*100:.2f}%, CSLL {e.presumido_csll_base*100:.2f}%)"
@@ -902,50 +907,77 @@ def gerar_excel(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas, periodo: 
         ("INSS Alíquota", e.inss_aliquota, "percent"),
     ]
 
+    # ==== Escrita no Excel ====
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
         pd.DataFrame().to_excel(writer, sheet_name="Relatório", index=False)
         ws = writer.sheets["Relatório"]
         wb = writer.book
 
+        # Formatações
         money_fmt = wb.add_format({"num_format": "R$ #,##0.00"})
         perc_fmt = wb.add_format({"num_format": "0.00%"})
-        header_fmt = wb.add_format({"bg_color": "#38B0DE", "font_color": "#FFFFFF", "bold": True,"align": "center","valign": "vcenter"})
+        header_fmt = wb.add_format({"bg_color": "#38B0DE", "font_color": "#FFFFFF", "bold": True,
+                                    "align": "center","valign": "vcenter"})
         title_fmt = wb.add_format({"bold": True, "font_size": 14})
         total_text_fmt = wb.add_format({"bg_color": "#38B0DE", "font_color": "#FFFFFF", "bold": True})
-        total_money_fmt = wb.add_format({"bg_color": "#38B0DE", "font_color": "#FFFFFF", "bold": True, "num_format": "R$ #,##0.00"})
-        total_perc_fmt = wb.add_format({"bg_color": "#38B0DE", "font_color": "#FFFFFF", "bold": True, "num_format": "0.00%"})
+        total_money_fmt = wb.add_format({"bg_color": "#38B0DE", "font_color": "#FFFFFF", "bold": True,
+                                         "num_format": "R$ #,##0.00"})
+        total_perc_fmt = wb.add_format({"bg_color": "#38B0DE", "font_color": "#FFFFFF", "bold": True,
+                                        "num_format": "0.00%"})
 
         def write_block(title, start_row, start_col, df, total_row_name: str | None):
+            # título
             ws.merge_range(start_row, start_col, start_row, start_col + max(df.shape[1]-1, 0), title, title_fmt)
             r = start_row + 1
+            # header
             for j, col in enumerate(df.columns):
                 ws.write(r, start_col + j, col, header_fmt)
             r += 1
+            # corpo
             for i in range(len(df)):
                 row_is_total = False
                 first_col_name = df.columns[0] if len(df.columns) else ""
                 if total_row_name and first_col_name in ("Tributo", "Imposto"):
                     row_is_total = str(df.iloc[i, 0]).strip().upper() in {total_row_name.upper()}
-                row_label =  str(df.iloc[i, 0]) if first_col_name == "Item" else ""
+                row_label = str(df.iloc[i, 0]) if first_col_name == "Item" else ""
                 for j, col in enumerate(df.columns):
                     val = df.iloc[i, j]
                     fmt = None
-                    if col in {"Base", "Crédito", "Valor"}: fmt = money_fmt
-                    elif col in {"Alíquota"}: fmt = perc_fmt
+                    if col in {"Base", "Crédito", "Valor"}:
+                        fmt = money_fmt
+                    elif col in {"Alíquota"}:
+                        fmt = perc_fmt
+
+                    # Resumo comparativo: formata % na linha "Carga sobre Receita"
                     if first_col_name == "Imposto" and j > 0:
                         fmt = perc_fmt if df.iloc[i, 0] == "Carga sobre Receita" else money_fmt
+
+                    # Bloco "Item / Valor": trate % para linhas com "alíquota"
                     if first_col_name == "Item" and col == "Valor":
-                        if "alíquota" in row_label.lower(): fmt = perc_fmt
-                        elif row_label in ("RBT12","Receita do mês","Folha 12m","Parcela a Deduzir (PD)","DAS do mês"): fmt = money_fmt
+                        if "alíquota" in row_label.lower():
+                            fmt = perc_fmt
+                        elif row_label in ("RBT12","Receita do mês","Folha 12m","Parcela a Deduzir (PD)","DAS do mês"):
+                            fmt = money_fmt
+
                     if row_is_total:
-                        if j == 0: fmt = total_text_fmt
-                        elif fmt is perc_fmt: fmt = total_perc_fmt
-                        else: fmt = total_money_fmt
-                    cell_row = r + i; cell_col = start_col + j
-                    if pd.isna(val): ws.write_blank(cell_row, cell_col, np.nan, fmt)
-                    elif isinstance(val, (int, float)) and fmt is not np.nan: ws.write_number(cell_row, cell_col, float(val), fmt)
-                    else: ws.write(cell_row, cell_col, val, fmt)
+                        if j == 0:
+                            fmt = total_text_fmt
+                        elif fmt is perc_fmt:
+                            fmt = total_perc_fmt
+                        else:
+                            fmt = total_money_fmt
+
+                    cell_row = r + i
+                    cell_col = start_col + j
+                    if pd.isna(val):
+                        ws.write_blank(cell_row, cell_col, np.nan, fmt)
+                    elif isinstance(val, (int, float)) and fmt is not np.nan:
+                        ws.write_number(cell_row, cell_col, float(val), fmt)
+                    else:
+                        ws.write(cell_row, cell_col, val, fmt)
+
+            # larguras
             for j, col in enumerate(df.columns):
                 width = 24 if col in ("Regime","Tributo","Imposto","Item") else 18
                 ws.set_column(start_col + j, start_col + j, width)
@@ -960,23 +992,24 @@ def gerar_excel(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas, periodo: 
             for i, (name, value, kind) in enumerate(rows):
                 ws.write(r + i, start_col + 0, name)
                 fmt = money_fmt if kind == "money" else perc_fmt if kind == "percent" else np.nan
-                if isinstance(value, (int, float)) and fmt is not np.nan: ws.write_number(r + i, start_col + 1, float(value), fmt)
-                else: ws.write(r + i, start_col + 1, value)
+                if isinstance(value, (int, float)) and fmt is not np.nan:
+                    ws.write_number(r + i, start_col + 1, float(value), fmt)
+                else:
+                    ws.write(r + i, start_col + 1, value)
             ws.set_column(start_col + 0, start_col + 0, 28)
             ws.set_column(start_col + 1, start_col + 1, 26)
             return r + len(rows) + 3
 
+        # — Resumo (Comparativo)
         row = 0
         row = write_block("Resumo (Comparativo)", row, 0, df_comp, total_row_name="Total")
 
         # --- GRÁFICO (Excel): Total por Regime a partir de H16 ---
-        from xlsxwriter.utility import xl_rowcol_to_cell, xl_range
-
+        from xlsxwriter.utility import xl_range
         start_row = 15   # linha 16 (0-based)
         start_col = 7    # coluna H (0-based)
 
         regimes = ["Lucro Presumido", "Lucro Real"]
-        # usar apenas valores a pagar conforme 'modo'
         _is_reforma = (modo == "reforma")
         tot_lp_pos = total_a_pagar_regime(rp, e, modo=("reforma" if _is_reforma else "atual"))
         tot_lr_pos = total_a_pagar_regime(rr, e, modo=("reforma" if _is_reforma else "atual"))
@@ -985,21 +1018,17 @@ def gerar_excel(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas, periodo: 
             regimes.append("Simples Nacional")
             totais.append(float(sn.get("das_total_com_difal", sn["das_mes"])))
 
-
         # header
         ws.write(start_row,   start_col,     "Regime", header_fmt)
         ws.write(start_row,   start_col + 1, "Total (R$)", header_fmt)
-
         # dados
         for i, (reg, val) in enumerate(zip(regimes, totais), start=1):
             ws.write(start_row + i, start_col,     reg)
             ws.write_number(start_row + i, start_col + 1, val, money_fmt)
-
-        # referências
+        # refs
         first = start_row + 1
         last  = start_row + len(regimes)
-
-        categorias_ref = f"=Relatório!{xl_range(first, start_col, last, start_col)}"
+        categorias_ref = f"=Relatório!{xl_range(first, start_col,     last, start_col)}"
         valores_ref    = f"=Relatório!{xl_range(first, start_col + 1, last, start_col + 1)}"
 
         chart = wb.add_chart({"type": "column"})
@@ -1013,54 +1042,52 @@ def gerar_excel(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas, periodo: 
         chart.set_legend({"none": True})
         chart.set_y_axis({"num_format": "R$ #,##0"})
         chart.set_size({"width": 520, "height": 300})
-
-        # ancora o gráfico algumas colunas à direita do range (H16 → insere em K16)
         ws.insert_chart(start_row, start_col + 3, chart)
 
-
-
-
+        # — Detalhamentos LP/LR
         row = write_block("Detalhamento — Lucro Presumido", row, 0, dflp, total_row_name="TOTAL")
-        row = write_block("Detalhamento — Lucro Real", row, 0, dflr, total_row_name="TOTAL")
+        row = write_block("Detalhamento — Lucro Real",      row, 0, dflr, total_row_name="TOTAL")
 
+        # — Detalhamento — Simples Nacional (NOVO: agora sempre gravado quando existir)
         if sn is not None:
-            df_sn = pd.DataFrame([
-                {"Item": "RBT12", "": sn.get("rbt12", 0.0)},
-                {"Item": "Receita do mês", "": sn.get("receita_mes", 0.0)},
-                {"Item": "Folha 12m", "": sn.get("folha_12m", 0.0)},
+            df_sn_rows = [
+                ("RBT12",                      sn.get("rbt12", 0.0),                        None),
+                ("Receita do mês",             sn.get("receita_mes", 0.0),                  None),
+                ("Folha 12m",                  sn.get("folha_12m", 0.0),                    None),
 
-                {"Item": "CNAE", "": "", "Info": sn.get("cnae", "")},
-                {"Item": "Anexo", "": "", "Info": sn.get("anexo", "")},
+                ("CNAE",                       np.nan,                                      sn.get("cnae", "")),
+                ("Anexo",                      np.nan,                                      sn.get("anexo", "")),
 
-                {"Item": "Alíquota Nominal", "": sn["aliquota_nominal"]},
-                {"Item": "Parcela a Deduzir (PD)", "": sn["parcela_deduzir"]},
-                {"Item": "Alíquota Efetiva", "": sn["aliquota_efetiva"]},
-                {"Item": "DAS do mês", "": sn["das_mes"]},
+                ("Alíquota Nominal",           sn["aliquota_nominal"],                      None),
+                ("Parcela a Deduzir (PD)",     sn["parcela_deduzir"],                       None),
+                ("Alíquota Efetiva",           sn["aliquota_efetiva"],                      None),
+                ("DAS do mês",                 sn["das_mes"],                               None),
 
-                {"Item": "DIFAL Vendas — Base (soma)", "": sn.get("difal_base_v", 0.0)},
-                {"Item": "DIFAL Vendas — Alíquotas / UFs", "": "", "Info": "múltiplas linhas"},
-                {"Item": "DIFAL Vendas — Parcela (aliq × base)", "": sn.get("difal_parte_v", 0.0)},
-                {"Item": "DIFAL Vendas — FCP (R$)", "": sn.get("fcp_valor_v", 0.0)},
-                {"Item": "DIFAL Vendas — Total", "": sn.get("difal_total_v", 0.0)},
+                ("DIFAL Vendas — Base (soma)",                   sn.get("difal_base_v", 0.0),  None),
+                ("DIFAL Vendas — Alíquotas / UFs",               np.nan,                       "múltiplas linhas"),
+                ("DIFAL Vendas — Parcela (aliq × base)",         sn.get("difal_parte_v", 0.0), None),
+                ("DIFAL Vendas — FCP (R$)",                      sn.get("fcp_valor_v", 0.0),   None),
+                ("DIFAL Vendas — Total",                         sn.get("difal_total_v", 0.0), None),
 
-                {"Item": "DIFAL Compras — Base (soma)", "": sn.get("difal_base_c", 0.0)},
-                {"Item": "DIFAL Compras — Alíquotas / UFs", "": "", "Info": "múltiplas linhas"},
-                {"Item": "DIFAL Compras — Parcela (aliq × base)", "": sn.get("difal_parte_c", 0.0)},
-                {"Item": "DIFAL Compras — FCP (R$)", "": sn.get("fcp_valor_c", 0.0)},
-                {"Item": "DIFAL Compras — Total", "": sn.get("difal_total_c", 0.0)},
+                ("DIFAL Compras — Base (soma)",                  sn.get("difal_base_c", 0.0),  None),
+                ("DIFAL Compras — Alíquotas / UFs",              np.nan,                       "múltiplas linhas"),
+                ("DIFAL Compras — Parcela (aliq × base)",        sn.get("difal_parte_c", 0.0), None),
+                ("DIFAL Compras — FCP (R$)",                     sn.get("fcp_valor_c", 0.0),   None),
+                ("DIFAL Compras — Total",                        sn.get("difal_total_c", 0.0), None),
 
-                {"Item": f"Total Simples ({sn.get('criterio_soma_difal','')})",
-                "Valor": sn.get("das_total_com_difal", sn["das_mes"])},
-            ])
-
+                (f"Total Simples ({sn.get('criterio_soma_difal','')})",
+                                                     sn.get("das_total_com_difal", sn["das_mes"]), None),
+            ]
+            df_sn = pd.DataFrame(df_sn_rows, columns=["Item","Valor","Info"])
             df_sn["Valor"] = pd.to_numeric(df_sn["Valor"], errors="coerce")
-            if "Info" in df_sn.columns:
-                df_sn["Info"] = df_sn["Info"].fillna("").replace({None: ""})
 
+            row = write_block("Detalhamento — Simples Nacional", row, 0, df_sn, total_row_name=None)
 
+        # — Bloco de parâmetros (lado direito, topo)
         _ = write_params_block(0, 7, params_rows)
 
     return output.getvalue()
+
 
 def gerar_pdf(rp: ResultadoRegime, rr: ResultadoRegime, e: Entradas,
               sn: dict | None = None, modo: Literal["atual","reforma"]="atual") -> bytes:
